@@ -1,0 +1,7 @@
+ethereum-vault-connector/=lib/euler-vault-kit/lib/ethereum-vault-connector/src/
+euler-vault-kit/=lib/euler-vault-kit/src/
+euler-price-oracle/=lib/euler-price-oracle/
+permit2/=lib/euler-vault-kit/lib/permit2/
+forge-std/=lib/forge-std/src/
+openzeppelin-contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/
+openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/

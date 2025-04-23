@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.28;
 
 import {Test, console2} from "forge-std/Test.sol";
 
@@ -71,7 +71,7 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     address balanceForwarderModule;
     address governanceModule;
 
-    // addresses shared in every test file, set based on chainId AKA FOUNDRY_PROFILE
+    // addresses shared in every test file, set based on chainId AKA FOUNDRY_PROFILE .env variable
     address aavePool;
     address eulerWETH;
     // address eulerCBBTC;
@@ -89,8 +89,17 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     error UnknownProfile();
 
     function setUp() public virtual {
-        string memory foundryProfile = vm.envString("FOUNDRY_PROFILE");
-        if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("base")))) {
+        if (block.chainid == 1) { // mainnet
+            vm.rollFork(22250000);
+            aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+            eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
+            // eulerCBBTC = 0x056f3a2E41d2778D3a0c0714439c53af2987718E;
+            eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
+            eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
+            eulerUSDS = 0x1cA03621265D9092dC0587e1b50aB529f744aacB;
+            eulerOnChain = EulerRouter(0x83B3b76873D36A28440cF53371dF404c42497136);
+        } else if (block.chainid == 8453) { // base
+            vm.rollFork(29270000);
             aavePool = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
             // eulerCBBTC = 0x882018411Bc4A020A879CEE183441fC9fa5D7f8B;
@@ -98,7 +107,8 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerUSDS = 0x556d518FDFDCC4027A3A1388699c5E11AC201D8b;
             eulerOnChain = EulerRouter(0x6E183458600e66047A0f4D356d9DAa480DA1CA59);
-        } else if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("sonic")))) {
+        } else if (block.chainid == 146) {
+            vm.rollFork(19185510);
             aavePool = 0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3;
             eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
             // eulerCBBTC = address(0); // no BTC pool on Sonic Euler yet
@@ -106,14 +116,6 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
             eulerUSDS = 0xB38D431e932fEa77d1dF0AE0dFE4400c97e597B8; // actually this is scUSD
             eulerOnChain = EulerRouter(0x231811a9574dDE19e49f72F7c1cAC3085De6971a);
-        }  else if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("mainnet")))) {
-            aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
-            eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
-            // eulerCBBTC = 0x056f3a2E41d2778D3a0c0714439c53af2987718E;
-            eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
-            eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
-            eulerUSDS = 0x000000000000000000000000000000000000DdDD;
-            eulerOnChain = EulerRouter(0x83B3b76873D36A28440cF53371dF404c42497136);
         } else {
             revert UnknownProfile();
         }

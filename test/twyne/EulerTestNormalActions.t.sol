@@ -318,10 +318,10 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         // Deposit 1 eWETH, withdraw to the maxBorrow limit allowed by the external EVK vault
         uint256 oneEther = 1 ether;
 
-        uint256 borrowAmountInETH = oneEther * uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffer()) / (MAXFACTOR * MAXFACTOR);
+        uint256 borrowAmountInETH = oneEther * uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) / (MAXFACTOR * MAXFACTOR);
 
         // Some shared logic with test_e_maxBorrowFromEulerDirect()
-        alice_collateral_vault.setTwyneLiqLTV(uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffer()) / MAXFACTOR);
+        alice_collateral_vault.setTwyneLiqLTV(uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) / MAXFACTOR);
         uint borrowValueInUSD = eulerOnChain.getQuote(borrowAmountInETH, eulerWETH, USD);
         uint USDCPrice = eulerOnChain.getQuote(1, USDC, USD); // returns a value times 1e10
         uint borrowAmountInUSDC = borrowValueInUSD / USDCPrice;
@@ -844,7 +844,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         // Use the first liquidation condition, in the if statement
         (uint256 externalCollateralValueScaledByLiqLTV, ) = IEVault(alice_collateral_vault.targetVault()).accountLiquidity(address(alice_collateral_vault), true);
-        uint256 borrowAmountUSDC = uint256(twyneVaultManager.externalLiqBuffer()) * externalCollateralValueScaledByLiqLTV;
+        uint256 borrowAmountUSDC = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) * externalCollateralValueScaledByLiqLTV;
 
         alice_collateral_vault.borrow(borrowAmountUSDC/1e16, alice); // why 1e16? because it just works??
 
@@ -1099,7 +1099,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         vm.startPrank(alice);
         // Toggle LTV before any borrows exist
-        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLiqLTV());
+        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset()));
         vm.stopPrank();
     }
 
@@ -1116,9 +1116,10 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         alice_collateral_vault.setTwyneLiqLTV(1e4);
 
-        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLiqLTV() - 800);
-        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLiqLTV() - 400);
-        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLiqLTV());
+        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset());
+        alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 800);
+        alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 400);
+        alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV);
         vm.stopPrank();
     }
 
@@ -1167,7 +1168,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         vm.revertToState(snapshot);
         uint16 eulerUSDCLiqLTV = IEVault(eulerUSDC).LTVLiquidation(eulerWETH);
-        uint safeLiqLTV_ext = uint(eulerUSDCLiqLTV) * uint(twyneVaultManager.externalLiqBuffer()); // 1e8 precision
+        uint safeLiqLTV_ext = uint(eulerUSDCLiqLTV) * uint(twyneVaultManager.externalLiqBuffers(eulerWETH)); // 1e8 precision
 
         // teleport position
         vm.startPrank(teleporter);

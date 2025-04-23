@@ -17,12 +17,12 @@ contract VaultManager is Ownable, IErrors {
 
     address public collateralVaultFactory;
 
-    uint16 public maxTwyneLiqLTV; // This is a protocol-wide parameter, not specific to a single asset
-    uint16 public externalLiqBuffer; // This is a protocol-wide parameter, not specific to a single asset
+    mapping(address collateralAddress => uint16 maxTwyneLiqLTV) public maxTwyneLTVs; // mapped to underlying asset in the collateral vault (can use intermediateVault for now)
+    mapping(address collateralAddress => uint16 externalLiqBuffer) public externalLiqBuffers; // mapped to underlying asset in the collateral vault (can use intermediateVault for now)
 
     EulerRouter public oracleRouter;
 
-    mapping(address credit => address intermediateVault) internal intermediateVaults;
+    mapping(address collateralAddress => address intermediateVault) internal intermediateVaults;
     mapping(address intermediateVault => mapping(address targetVault => bool allowed)) public isAllowedTargetVault;
 
     mapping(address intermediateVault => address[] targetVaults) public allowedTargetVaultList;
@@ -34,7 +34,6 @@ contract VaultManager is Ownable, IErrors {
 
     constructor(address _owner, address _factory) Ownable(_owner) {
         collateralVaultFactory = _factory;
-        externalLiqBuffer = uint16(MAXFACTOR); // avoids zero case with instant liquidation
     }
 
     /// @notice Set oracleRouter address. Governance-only.
@@ -43,10 +42,10 @@ contract VaultManager is Ownable, IErrors {
     }
 
     /// @notice Get a collateral vault's intermediate vault.
-    /// @param _asset the asset held by the intermediate vault.
-    /// @return vault intermediate vault for the given _asset.
-    function getIntermediateVault(address _asset) external view returns (address vault) {
-        vault = intermediateVaults[_asset];
+    /// @param _collateralAddress the collateral asset held by the intermediate vault.
+    /// @return vault intermediate vault for the given _collateralAddress.
+    function getIntermediateVault(address _collateralAddress) external view returns (address vault) {
+        vault = intermediateVaults[_collateralAddress];
         require(vault != address(0), IntermediateVaultNotSet());
     }
 
@@ -89,16 +88,16 @@ contract VaultManager is Ownable, IErrors {
 
     /// @notice Set protocol-wide maxTwyneLiqLTV. Governance-only.
     /// @param _ltv new maxTwyneLiqLTV value.
-    function setMaxLiquidationLTV(uint16 _ltv) external onlyOwner {
+    function setMaxLiquidationLTV(address _collateralAddress, uint16 _ltv) external onlyOwner {
         require(_ltv <= MAXFACTOR, ValueOutOfRange());
-        maxTwyneLiqLTV = _ltv;
+        maxTwyneLTVs[_collateralAddress] = _ltv;
     }
 
     /// @notice Set protocol-wide externalLiqBuffer. Governance-only.
     /// @param _liqBuffer new externalLiqBuffer value.
-    function setExternalLiqBuffer(uint16 _liqBuffer) external onlyOwner {
+    function setExternalLiqBuffer(address _collateralAddress, uint16 _liqBuffer) external onlyOwner {
         require(0 != _liqBuffer  && _liqBuffer <= MAXFACTOR, ValueOutOfRange());
-        externalLiqBuffer = _liqBuffer;
+        externalLiqBuffers[_collateralAddress] = _liqBuffer;
     }
 
     /// @notice Set new collateralVaultFactory address. Governance-only.
@@ -142,9 +141,9 @@ contract VaultManager is Ownable, IErrors {
     /// @param _liqLTV The LTV that the user wants to use for their collateral vault.
     /// @param _targetVault The target vault used for the borrow by collateral vault.
     /// @param _collateralAddress The collateral asset used by collateral vault.
-    function checkLiqLTV(uint _liqLTV, address _targetVault, address _collateralAddress) public view {
+    function checkLiqLTV(uint _liqLTV, address _targetVault, address _collateralAddress) external view {
         uint16 minLTV = IEVault(_targetVault).LTVLiquidation(_collateralAddress);
-        require(uint(minLTV) * uint(externalLiqBuffer) <= _liqLTV * MAXFACTOR && _liqLTV <= maxTwyneLiqLTV, ValueOutOfRange());
+        require(uint(minLTV) * uint(externalLiqBuffers[_collateralAddress]) <= _liqLTV * MAXFACTOR && _liqLTV <= maxTwyneLTVs[_collateralAddress], ValueOutOfRange());
     }
 
     receive() external payable {}

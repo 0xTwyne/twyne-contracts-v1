@@ -275,12 +275,12 @@ contract TwyneDeployEulerIntegration is Script {
         collateralVaultFactory.setVaultManager(address(vaultManager));
 
         vaultManager.setOracleRouter(address(oracleRouter));
-        vaultManager.setMaxLiquidationLTV(0.98e4);
+        vaultManager.setMaxLiquidationLTV(eulerWETH, 0.98e4);
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newIntermediateVault(eulerWETH, address(oracleRouter), USD);
 
-        vaultManager.setExternalLiqBuffer(0.95e4);
+        vaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
         // Next: Deploy collateral vault

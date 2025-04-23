@@ -74,16 +74,18 @@ abstract contract CollateralVaultBase is VaultBase {
 
         twyneVaultManager = __vaultManager;
         collateralVaultFactory = CollateralVaultFactory(msg.sender);
-        intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(address(__asset)));
+        address _intermediateVault = twyneVaultManager.getIntermediateVault(address(__asset));
+        intermediateVault = IEVault(_intermediateVault);
 
         // checkLiqLTV must happen after targetVault() and asset() return meaningful values
         __vaultManager.checkLiqLTVByCollateralVault(__liqLTV);
         twyneLiqLTV = __liqLTV;
-        SafeERC20.forceApprove(IERC20(_asset), address(intermediateVault), type(uint).max); // necessary for EVK repay()
-        evc.enableController(address(this), address(intermediateVault)); // necessary for EVK borrowing
+        SafeERC20.forceApprove(IERC20(__asset), _intermediateVault, type(uint).max); // necessary for EVK repay()
+        SafeERC20.forceApprove(IERC20(IEVault(address(__asset)).asset()), address(__asset), type(uint).max); // necessary for _depositUnderlying()
+        evc.enableController(address(this), _intermediateVault); // necessary for EVK borrowing
         evc.enableCollateral(address(this), address(this)); // necessary for EVK borrowing
 
-        require(address(__asset) == intermediateVault.asset(), AssetMismatch());
+        require(address(__asset) == IEVault(_intermediateVault).asset(), AssetMismatch());
     }
 
     function initialize(

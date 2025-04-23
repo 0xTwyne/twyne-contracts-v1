@@ -5,14 +5,14 @@ pragma solidity ^0.8.19;
 import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
-import {Errors} from "src/twyne/Errors.sol";
+import {IErrors} from "src/interfaces/IErrors.sol";
 import {RevertBytes} from "euler-vault-kit/EVault/shared/lib/RevertBytes.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
 /// @notice Manages twyne parameters that affect it globally: assets allowed, LTVs, interest rates.
 /// To be owned by Twyne multisig.
-contract VaultManager is Ownable, Errors {
+contract VaultManager is Ownable, IErrors {
     uint internal constant MAXFACTOR = 1e4;
 
     address public collateralVaultFactory;

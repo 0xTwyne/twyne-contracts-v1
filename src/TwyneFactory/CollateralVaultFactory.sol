@@ -9,9 +9,9 @@ import {IERC20, CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
-import {Errors} from "src/twyne/Errors.sol";
+import {IErrors} from "src/interfaces/IErrors.sol";
 
-contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, Errors {
+contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors {
     event CollateralVaultCreated(address vault);
 
     address constant USD = address(840);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.28;
 
 import {EulerTestNormalActions, console2} from "./EulerTestNormalActions.t.sol";
 import "euler-vault-kit/EVault/shared/types/Types.sol";
@@ -20,6 +20,8 @@ import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.so
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
 import {MockCollateralVault} from "test/mocks/MockCollateralVault.sol";
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
+import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 
 contract NewImplementation {
     uint constant public version = 953;
@@ -105,32 +107,26 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         vm.startPrank(alice);
         IERC20(eulerWETH).transfer(address(evc), COLLATERAL_AMOUNT);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](5);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](4);
         items[0] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, (alice_collateral_vault.maxRelease()))
-        });
-        items[1] = IEVC.BatchItem({
             targetContract: eulerEVC,
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(evc.enableCollateral, (address(evc), eulerWETH))
         });
-        items[2] = IEVC.BatchItem({
+        items[1] = IEVC.BatchItem({
             targetContract: eulerEVC,
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(evc.enableController, (address(evc), eulerUSDC))
         });
-        items[3] = IEVC.BatchItem({
+        items[2] = IEVC.BatchItem({
             targetContract: eulerUSDC,
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(IEVault(eulerUSDC).liquidate, (address(alice_collateral_vault), eulerWETH, type(uint).max, 0))
         });
-        items[4] = IEVC.BatchItem({
+        items[3] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -138,8 +134,8 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         });
 
         // cannot make a position unhealthy and liquidate in the same tx.
-        // this reverts in items[3] tx.
-        vm.expectRevert(Errors.E_LiquidationCoolOff.selector);
+        // this reverts in items[2] tx.
+        vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
         evc.batch(items);
         vm.stopPrank();
     }
@@ -254,10 +250,10 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
 
         // borrower has MORE debt in eUSDC
         assertGt(alice_collateral_vault.maxRelease(), 1e10);
-        // bridge now has MORE debt in eUSDC
+        // collateral vault now has MORE debt in eUSDC
         assertGt(alice_collateral_vault.maxRepay(), BORROW_USD_AMOUNT);
 
-        // now repay - first Euler debt, then the bridge debt
+        // now repay - first Euler debt, then withdraw
         vm.startPrank(alice);
         IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
@@ -345,7 +341,8 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         alice_collateral_vault.depositUnderlying(INITIAL_DEALT_ERC20 / 2);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         alice_collateral_vault.deposit(INITIAL_DEALT_ERC20 / 4);
-        // withdraw is successful
+        // withdraw is blocked because of the automatic rebalancing on the intermediate vault, which is paused
+        vm.expectRevert(Errors.E_OperationDisabled.selector);
         alice_collateral_vault.withdraw(1 ether, alice);
         vm.stopPrank();
 
@@ -367,25 +364,17 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         eeWETH_intermediate_vault.skim(CREDIT_LP_AMOUNT, eve);
         vm.stopPrank();
 
-        // after unpause, collateral deposit should work, but can't just deposit, need to ALSO reserve with invariant design
+        // after unpause, collateral deposit should work
         vm.startPrank(alice);
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
 
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, alice_collateral_vault);
-
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT))
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, reservedAmount)
         });
 
         evc.batch(items);
@@ -475,9 +464,6 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
         alice_collateral_vault.handleExternalLiquidation();
 
-        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
-        alice_collateral_vault.canRebalance();
-
         vm.expectRevert(TwyneErrors.T_OperationDisabled.selector);
         eeWETH_intermediate_vault.flashLoan(1, abi.encode(""));
 
@@ -495,22 +481,16 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         // Base=0.00% APY,  Kink(80.00%)=10.00% APY  Max=120.00% APY
         address irm = address(new IRMLinearKink(0, 879011157, 25570578576, 3435973836));
         uint ir = IRMLinearKink(irm).computeInterestRateView(address(0), 100, 0);
-        console2.log("first ir", ir);
         ir = IRMLinearKink(irm).computeInterestRateView(address(0), 100, 50);
-        console2.log("second ir", ir);
         ir = IRMLinearKink(irm).computeInterestRateView(address(0), 100, 900);
-        console2.log("third ir", ir);
         vm.expectRevert(IIRM.E_IRMUpdateUnauthorized.selector);
         IRMLinearKink(irm).computeInterestRate(address(0), 100, 900);
 
         // IRMTwyneCurve curvedIRM = new IRMTwyneCurve(1500, 8000, 12000, 6000);
         IRMTwyneCurve curvedIRM = new IRMTwyneCurve(1000, 8000, 12000, 4000);
         ir = curvedIRM.computeInterestRateView(address(0), 100, 0);
-        console2.log("first curved ir", ir);
         ir = curvedIRM.computeInterestRateView(address(0), 100, 50);
-        console2.log("second curved ir", ir);
         ir = curvedIRM.computeInterestRateView(address(0), 100, 900);
-        console2.log("third curved ir", ir);
         vm.expectRevert(IIRM.E_IRMUpdateUnauthorized.selector);
         curvedIRM.computeInterestRate(address(0), 100, 900);
         vm.expectRevert(IIRM.E_IRMUpdateUnauthorized.selector);
@@ -539,25 +519,6 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         vm.expectRevert(TwyneErrors.NotIntermediateVault.selector);
         collateralVaultFactory.setCollateralVaultLiquidated(address(this));
 
-        vm.stopPrank();
-    }
-
-    // Confirm that intermediate vault reserving cannot be looped
-    function test_e_reserveLooping() public {
-        test_e_collateralDepositWithoutBorrow();
-
-        assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), COLLATERAL_AMOUNT);
-
-        vm.startPrank(alice);
-        // Can maxReserve assets, the invariant still holds.
-        uint256 maxReserve = COLLATERAL_AMOUNT - alice_collateral_vault.maxRelease();
-        alice_collateral_vault.reserve(maxReserve - 1);
-
-        assertGt(alice_collateral_vault.canRebalance(), 0);
-
-        // But cannot exceed the maxReserve value. EVK requires collateralValue > liabilityValue, reverts if equal
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        alice_collateral_vault.reserve(1);
         vm.stopPrank();
     }
 
@@ -603,9 +564,6 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         vm.startPrank(admin);
         vm.expectRevert(TwyneErrors.IntermediateVaultAlreadySet.selector);
         twyneVaultManager.setIntermediateVault(eeWSTETH_intermediate_vault);
-
-        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
-        twyneVaultManager.doCall(address(alice_collateral_vault), 0, abi.encodeCall(CollateralVaultBase.rebalance, ()));
         vm.stopPrank();
 
         address collateralAsset =  IEVault(eeWSTETH_intermediate_vault).asset();
@@ -632,7 +590,7 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         twyneVaultManager.setLTV(eeWSTETH_intermediate_vault, address(alice_collateral_vault), 6500, 7500, 0);
 
         twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 1e4);
-        twyneVaultManager.setMaxLiquidationLTV(eulerWSTETH, 1e4);
+        twyneVaultManager.setExternalLiqBuffer(eulerWSTETH, 1e4);
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 1e4 + 1);
 

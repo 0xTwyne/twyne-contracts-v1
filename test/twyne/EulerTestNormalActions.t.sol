@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.28;
 
 import {OverCollateralizedTestBase, console2} from "./OverCollateralizedTestBase.t.sol";
 import "euler-vault-kit/EVault/shared/types/Types.sol";
@@ -138,21 +138,13 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
 
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, alice_collateral_vault);
-
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT))
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, reservedAmount)
         });
 
         evc.batch(items);
@@ -164,9 +156,6 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         vm.expectRevert(TwyneErrors.ReceiverNotBorrower.selector);
         alice_collateral_vault.depositUnderlying(COLLATERAL_AMOUNT);
         vm.stopPrank();
-
-        uint eulerWETHBalance = IEVault(eulerWETH).balanceOf(address(alice_collateral_vault));
-        assertEq(eulerWETHBalance, COLLATERAL_AMOUNT + reservedAmount, "Unexpected amount of eulerWETH in collateral vault");
     }
 
     // credit LP withdraws their deposit in the intermediate vault
@@ -184,6 +173,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         vm.roll(block.number + blockIncrement);
         vm.warp(block.timestamp + 365 days);
 
+        // Confirm that time passing makes the collateral vault rebalanceable
+        assertGt(alice_collateral_vault.canRebalance(), 0, "Vault is not rebalanceable even with time passing");
+
         // Now overwrite the oracle address to avoid stale price revert condition
         address configuredWETH_USD_Oracle = oracleRouter.getConfiguredOracle(WETH, USD);
         address chainlinkFeed = ChainlinkOracle(configuredWETH_USD_Oracle).feed();
@@ -192,15 +184,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         // Alice withdraws her borrowing position from the collateral vault
         vm.startPrank(alice);
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
 
         items[0] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, (type(uint256).max))
-        });
-        items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -209,6 +195,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         evc.batch(items);
         vm.stopPrank();
+        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
 
         // Credit LP Bob withdraws all
         vm.startPrank(bob);
@@ -248,6 +235,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         vm.roll(block.number + blockIncrement);
         vm.warp(block.timestamp + 365 days);
 
+        // Confirm that time passing makes the collateral vault rebalanceable
+        assertGt(alice_collateral_vault.canRebalance(), 0, "Vault is not rebalanceable even with time passing");
+
         // Now overwrite the oracle address to avoid stale price revert condition
         address configuredWETH_USD_Oracle = oracleRouter.getConfiguredOracle(WETH, USD);
         address chainlinkFeed = ChainlinkOracle(configuredWETH_USD_Oracle).feed();
@@ -256,15 +246,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         // Alice withdraws her borrowing position from the collateral vault
         vm.startPrank(alice);
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
 
         items[0] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, (type(uint256).max))
-        });
-        items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -273,6 +257,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         evc.batch(items);
         vm.stopPrank();
+        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
 
         // Credit LP Bob withdraws all
         vm.startPrank(bob);
@@ -287,7 +272,6 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         eeWETH_intermediate_vault.convertFees();
         // Withdraw the fees owed to fee receiver (AKA governor receiver)
         uint receiveFees = eeWETH_intermediate_vault.redeem(type(uint).max, feeReceiver, feeReceiver);
-        // uint receiveFees = eeWETH_intermediate_vault.withdraw(eeWETH_intermediate_vault.maxWithdraw(feeReceiver), feeReceiver, feeReceiver);
         assertNotEq(receiveFees, 0, "Received governor fees was zero?!");
         vm.stopPrank();
 
@@ -325,11 +309,6 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         uint borrowValueInUSD = eulerOnChain.getQuote(borrowAmountInETH, eulerWETH, USD);
         uint USDCPrice = eulerOnChain.getQuote(1, USDC, USD); // returns a value times 1e10
         uint borrowAmountInUSDC = borrowValueInUSD / USDCPrice;
-
-        console2.log("eulerUSDC cash", IEVault(eulerUSDC).cash());
-        console2.log("borrowAmountInETH", borrowAmountInETH);
-        console2.log("borrowValueInUSD", borrowValueInUSD);
-        console2.log("borrowAmountInUSDC", borrowAmountInUSDC);
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         // reserve assets from intermediate vault
@@ -371,10 +350,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         IERC20(WETH).approve(address(alice_collateral_vault), type(uint).max);
 
-        uint eWETH_shares = IEVault(eulerWETH).convertToShares(COLLATERAL_AMOUNT);
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, alice_collateral_vault);
-
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
@@ -382,19 +358,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.depositUnderlying, COLLATERAL_AMOUNT)
         });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, reservedAmount)
-        });
 
         evc.batch(items);
-
         vm.stopPrank();
-
-        uint eulerWETHBalance = IEVault(eulerWETH).balanceOf(address(alice_collateral_vault));
-        assertEq(eulerWETHBalance, eWETH_shares + reservedAmount, "Unexpected amount of eulerWETH in collateral vault");
     }
 
     // Test Permit2 deposit of eWETH (not WETH)
@@ -430,7 +396,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
         // build a deposit batch with permit2
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         items[0].targetContract = permit2;
         items[0].onBehalfOfAccount = user;
         items[0].value = 0;
@@ -445,11 +411,6 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         items[1].onBehalfOfAccount = user;
         items[1].value = 0;
         items[1].data = abi.encodeCall(EulerCollateralVault(user_collateral_vault).deposit, (uint160(COLLATERAL_AMOUNT)));
-
-        items[2].targetContract = address(user_collateral_vault);
-        items[2].onBehalfOfAccount = user;
-        items[2].value = 0;
-        items[2].data = abi.encodeCall(EulerCollateralVault(user_collateral_vault).reserve, reservedAmount);
 
         evc.batch(items);
         vm.stopPrank();
@@ -486,12 +447,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
             sigDeadline: type(uint256).max
         });
 
-        uint eWETH_shares = IEVault(eulerWETH).convertToShares(COLLATERAL_AMOUNT);
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, EulerCollateralVault(user_collateral_vault));
-
         Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
         // build a deposit batch with permit2
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         items[0].targetContract = permit2;
         items[0].onBehalfOfAccount = user;
         items[0].value = 0;
@@ -507,16 +465,8 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         items[1].value = 0;
         items[1].data = abi.encodeCall(EulerCollateralVault(user_collateral_vault).depositUnderlying, (COLLATERAL_AMOUNT));
 
-        items[2].targetContract = address(user_collateral_vault);
-        items[2].onBehalfOfAccount = user;
-        items[2].value = 0;
-        items[2].data = abi.encodeCall(EulerCollateralVault(user_collateral_vault).reserve, reservedAmount);
-
         evc.batch(items);
         vm.stopPrank();
-
-        uint eulerWETHBalance = IEVault(eulerWETH).balanceOf(user_collateral_vault);
-        assertEq(eulerWETHBalance, eWETH_shares + reservedAmount, "Permit2 underlying: Unexpected amount of eulerWETH in collateral vault");
     }
 
     // Test the creation of a collateral vault in a batch (the frontend does this)
@@ -553,19 +503,13 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, alice_collateral_vault);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT))
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, reservedAmount)
         });
 
         evc.batch(items);
@@ -592,7 +536,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         uint collateralVaultBalance = alice_collateral_vault.balanceOf(address(alice_collateral_vault));
 
-        // ensure anyone else can't withdraw from alice's collateral vault
+        // ensure no one else can withdraw from alice's collateral vault
         vm.startPrank(bob);
         vm.expectRevert();
         alice_collateral_vault.withdraw(collateralVaultBalance, alice);
@@ -602,12 +546,6 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, alice_collateral_vault.maxRelease())
-        });
-        items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -646,15 +584,8 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         uint maxRedeem = IERC20(alice_collateral_vault.asset()).balanceOf(address(alice_collateral_vault)) - alice_collateral_vault.maxRelease();
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
-        // reserve assets from intermediate vault
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         items[0] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, alice_collateral_vault.maxRelease())
-        });
-        items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -693,18 +624,15 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
     function test_e_firstBorrowFromEulerViaCollateral() public noGasMetering {
         test_e_createWETHCollateralVault();
 
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, BORROW_USD_AMOUNT, alice_collateral_vault);
-
         // START DEBUG BLOCK
         // console2.log("COLLATERAL_AMOUNT", COLLATERAL_AMOUNT);
-        // console2.log("reservedAmount", reservedAmount);
         // console2.log("BORROW_USD_AMOUNT", BORROW_USD_AMOUNT);
         // END DEBUG BLOCK
 
         vm.startPrank(alice);
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
@@ -712,14 +640,8 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT))
         });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, reservedAmount)
-        });
         // borrow target asset
-        items[2] = IEVC.BatchItem({
+        items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -734,27 +656,8 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
     function test_e_postBorrowChecks() public {
         test_e_firstBorrowFromEulerViaCollateral();
 
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, alice_collateral_vault);
-
-        // borrower holds Twyne/EVK debt
-        assertEq(alice_collateral_vault.maxRelease(), reservedAmount, "EVK debt not correct amount");
         // alice_collateral_vault has eulerWETH collateral
         assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), COLLATERAL_AMOUNT);
-
-        // collateral vault holds borrowed eulerWETH from intermediate vault
-        assertApproxEqRel(
-            IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)),
-            COLLATERAL_AMOUNT + reservedAmount,
-            1e5,
-            "Collateral vault not holding correct eulerWETH balance"
-        );
-        // intermediate vault holds credit LP's eulerWETH minus the borrowed amount
-        assertApproxEqRel(
-            IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault)),
-            CREDIT_LP_AMOUNT - reservedAmount,
-            1e5,
-            "Intermediate vault not holding correct eulerWETH balance"
-        );
 
         // borrower got target asset
         assertEq(
@@ -771,8 +674,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
     }
 
     // Try reserving the most assets possible
-    // This extreme case allows C_LP = C - 1
-    // But then the position can be instantly liquidated
+    // The OLD extreme case allowed C_LP = C - 1, but now that rebalance happens on deposit, this shouldn't be possible
     function test_e_maxReserveCase() public noGasMetering {
         test_e_createWETHCollateralVault();
 
@@ -782,7 +684,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         // First, calculate and use max reserve assets from the intermediate vault
         uint borrowerCollateralAmount = 1 ether;
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
@@ -790,17 +692,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, borrowerCollateralAmount)
         });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, borrowerCollateralAmount - 1)
-        });
         evc.batch(items);
-
-        // But cannot exceed the maxReserve value. EVK requires collateralValue > liabilityValue, reverts if equal
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        alice_collateral_vault.reserve(1);
     }
 
     // Try max borrowing from the external protocol
@@ -812,22 +704,14 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         vm.startPrank(alice);
 
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
-        // First, calculate and use max reserve assets from the intermediate vault
-        uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, alice_collateral_vault);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, COLLATERAL_AMOUNT)
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.reserve, reservedAmount)
         });
         evc.batch(items);
 
@@ -857,11 +741,11 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         test_e_firstBorrowFromEulerDirect();
 
         vm.startPrank(alice);
-        // now repay the USDC to the collateral bridge vault, which will forward the funds to Euler
+        // now repay the USDC to the target vault and withdraw
         IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
         assertEq(IERC20(USDC).allowance(alice, address(alice_collateral_vault)), type(uint256).max);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
 
         // repay debt to Euler
         items[0] = IEVC.BatchItem({
@@ -870,16 +754,9 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.repay, (BORROW_USD_AMOUNT))
         });
-        // and now in eaUSDC vault
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, (type(uint256).max))
-        });
 
         // and now in eaUSDC vault
-        items[2] = IEVC.BatchItem({
+        items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -888,7 +765,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         evc.batch(items);
 
-        // bridge has no debt in Euler USDC
+        // collateral vault has no debt in Euler USDC
         assertEq(alice_collateral_vault.maxRepay(), 0, "1");
         // collateral vault has no debt from intermediate vault
         assertEq(alice_collateral_vault.maxRelease(), 0, "2");
@@ -919,7 +796,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         });
         Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](4);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
 
         items[0] = IEVC.BatchItem({
             targetContract: permit2,
@@ -940,14 +817,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.repay, (BORROW_USD_AMOUNT))
         });
-        // and now in eaUSDC vault
         items[2] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, (type(uint256).max))
-        });
-        items[3] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
@@ -957,7 +827,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         evc.batch(items);
         vm.stopPrank();
 
-        // bridge has no debt in Euler USDC
+        // collateral vault has no debt in Euler USDC
         assertEq(alice_collateral_vault.maxRepay(), 0);
         // collateral vault has no debt from intermediate vault
         assertEq(alice_collateral_vault.maxRelease(), 0);
@@ -983,59 +853,44 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         // borrower has MORE debt in eUSDC
         assertGt(alice_collateral_vault.maxRelease(), 1e10);
-        // bridge now has MORE debt in eUSDC
+        // collateral vault now has MORE debt in eUSDC
         assertGt(alice_collateral_vault.maxRepay(), BORROW_USD_AMOUNT);
 
-        // now repay - first Euler debt, then the bridge debt
+        // now repay - first Euler debt, then withdraw all
         vm.startPrank(alice);
         IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
         assertEq(IERC20(USDC).allowance(alice, address(alice_collateral_vault)), type(uint256).max);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
-
         // repay debt to Euler
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         items[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.repay, (type(uint256).max))
         });
-        // and now in eaUSDC vault
-        items[1] = IEVC.BatchItem({
-            targetContract: address(alice_collateral_vault),
-            onBehalfOfAccount: alice,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.release, (type(uint256).max))
-        });
-
-        // Borrower has repaid and released the entire amount, but hasn't withdrawn
-        // its collateral. This fails the rebalance invariant
-        vm.expectRevert(TwyneErrors.VaultHasNegativeExcessCredit.selector);
         evc.batch(items);
 
-        uint maxWithdraw = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
-
-        IEVC.BatchItem[] memory newItems = new IEVC.BatchItem[](3);
-        newItems[0] = items[0];
-        newItems[1] = items[1];
-        newItems[2] = IEVC.BatchItem({
+        // withdraw all assets
+        IEVC.BatchItem[] memory newItems = new IEVC.BatchItem[](1);
+        newItems[0] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (type(uint).max, alice))
         });
 
         deal(USDC, address(alice_collateral_vault), INITIAL_DEALT_ERC20); // minting USDC to alice to account for interest accrual
         evc.batch(newItems);
         vm.stopPrank();
 
-        // bridge has no debt in Euler USDC
+        // collateral vault has no debt in Euler USDC
         assertEq(alice_collateral_vault.maxRepay(), 0);
         // borrower alice has no debt from intermediate vault
         assertEq(alice_collateral_vault.maxRelease(), 0);
         assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0);
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0);
+        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
 
         // alice eulerWETH balance is restored to nearly the dealt amount, minus debt interest accumulation
         // assertEq(IERC20(eulerWETH).balanceOf(alice), IEVault(eulerWETH).convertToShares(INITIAL_DEALT_ETOKEN));
@@ -1062,19 +917,13 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         uint256 reservedAmount = getReservedAssets(COLLATERAL_AMOUNT, 0, tETH_laura_vault);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         // reserve assets from intermediate vault
         items[0] = IEVC.BatchItem({
             targetContract: address(tETH_laura_vault),
             onBehalfOfAccount: laura,
             value: 0,
             data: abi.encodeCall(tETH_laura_vault.deposit, (COLLATERAL_AMOUNT))
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: address(tETH_laura_vault),
-            onBehalfOfAccount: laura,
-            value: 0,
-            data: abi.encodeCall(tETH_laura_vault.reserve, reservedAmount)
         });
 
         evc.batch(items);
@@ -1087,7 +936,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         // borrower has debt from intermediate vault
         assertEq(tETH_laura_vault.maxRelease(), reservedAmount, "1");
-        // bridge has debt in Aave USDC
+        // collateral vault has debt in euler USDC
         assertEq(tETH_laura_vault.maxRepay(), BORROW_USD_AMOUNT, "2");
 
         // TODO could add warp and repay steps to verify logic of interest accumulation

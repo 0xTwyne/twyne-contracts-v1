@@ -68,20 +68,25 @@ contract EulerCollateralVault is CollateralVaultBase {
         return IEVault(targetVault).debtOf(address(this));
     }
 
-    /// @notice check whether internal accounting allows the vault to be rebalanced
-    /// @dev reverts if not able to rebalance
-    function _canRebalance() internal view override returns (uint excessCredit) {
+    /// @notice adjust credit reserved from intermediate vault
+    function _handleExcessCredit() internal override {
+        uint invariantCollateralAmount = _invariantCollateralAmount();
+
         uint vaultAssets = totalAssetsDepositedOrReserved;
-        uint userCollateral = vaultAssets - maxRelease();
+        if (vaultAssets > invariantCollateralAmount) {
+            totalAssetsDepositedOrReserved = vaultAssets - intermediateVault.repay(vaultAssets - invariantCollateralAmount, address(this));
+        } else {
+            totalAssetsDepositedOrReserved = vaultAssets + intermediateVault.borrow(invariantCollateralAmount - vaultAssets, address(this));
+        }
+    }
+
+    /// @notice Calculates the collateral assets that should be help by the collateral vault to comply with invariants
+    /// @return uint Returns the amount of collateral assets that the collateral vault should hold with zero excess credit
+    function _invariantCollateralAmount() internal view override returns (uint) {
+        uint userCollateral = totalAssetsDepositedOrReserved - maxRelease();
         uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(asset())) * uint(twyneVaultManager.externalLiqBuffers(asset())); // 1e8 precision
 
-        // rebalance() isn't protected by invariant check (no requireVaultStatusCheck in rebalance()).
-        // Thus, we underestimate the excess credit to release so that after its release,
-        // this vault doesn't have negative excess credit.
-        uint maxVaultAssets = Math.ceilDiv(userCollateral * twyneLiqLTV * MAXFACTOR, liqLTV_external);
-
-        require(vaultAssets > maxVaultAssets, CannotRebalance());
-        unchecked { excessCredit = vaultAssets - maxVaultAssets; }
+        return Math.ceilDiv(userCollateral * twyneLiqLTV * MAXFACTOR, liqLTV_external);
     }
 
     /// @notice borrows target assets from Euler
@@ -221,16 +226,6 @@ contract EulerCollateralVault is CollateralVaultBase {
         delete borrower;
 
         evc.requireVaultStatusCheck();
-    }
-
-    /// @notice Checks if the vault's current state has non-negative excess credit
-    /// @return bool Returns true if excess credit is non-negative, false otherwise
-    function _hasNonNegativeExcessCredit() internal view override returns (bool) {
-        uint vaultAssets = totalAssetsDepositedOrReserved;
-        uint userCollateral = vaultAssets - maxRelease();
-        uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(asset())) * uint(twyneVaultManager.externalLiqBuffers(asset())); // 1e8
-
-        return (vaultAssets * liqLTV_external >= userCollateral * twyneLiqLTV * MAXFACTOR);
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault

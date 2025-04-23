@@ -202,23 +202,6 @@ abstract contract CollateralVaultBase is VaultBase {
         return Math.min(intermediateVault.debtOf(address(this)), totalAssetsDepositedOrReserved);
     }
 
-    /// @dev This function reserves assets from the intermediate vault.
-    /// @param _amount The amount of assets to release back to the intermediate vault.
-    function reserve(uint _amount) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
-        createVaultSnapshot();
-        totalAssetsDepositedOrReserved += intermediateVault.borrow(_amount, address(this));
-        evc.requireAccountAndVaultStatusCheck(address(this));
-    }
-
-    /// @notice Using an amount of type(uint).max will repay the entire debt.
-    /// @dev This function returns principal and accumulated interest to the intermediate vault.
-    /// @param _amount The amount of assets to release back to the intermediate vault.
-    function release(uint _amount) external onlyBorrowerAndNotExtLiquidated nonReentrant {
-        createVaultSnapshot();
-        totalAssetsDepositedOrReserved -= intermediateVault.repay(_amount, address(this));
-        evc.requireVaultStatusCheck();
-    }
-
     ///
     // Functions from VaultSimple
     // https://github.com/euler-xyz/evc-playground/blob/master/src/vaults/open-zeppelin/VaultSimple.sol
@@ -237,7 +220,6 @@ abstract contract CollateralVaultBase is VaultBase {
     function doCheckVaultStatus(uint oldSnapshot) internal view override {
         // sanity check in case the snapshot hasn't been taken
         require(oldSnapshot != 0, SnapshotNotTaken());
-        require(_hasNonNegativeExcessCredit(), VaultHasNegativeExcessCredit());
         require(!_canLiquidate(), VaultStatusLiquidatable());
     }
 
@@ -257,8 +239,8 @@ abstract contract CollateralVaultBase is VaultBase {
 
         SafeERC20Lib.safeTransferFrom(IERC20_Euler(asset()), borrower, address(this), assets, permit2);
         totalAssetsDepositedOrReserved += assets;
-
-        evc.requireVaultStatusCheck();
+        _handleExcessCredit();
+        evc.requireAccountAndVaultStatusCheck(address(this));
     }
 
     /// @notice Deposits a certain amount of underlying asset for a receiver.
@@ -271,7 +253,8 @@ abstract contract CollateralVaultBase is VaultBase {
     {
         createVaultSnapshot();
         totalAssetsDepositedOrReserved += _depositUnderlying(underlying);
-        evc.requireVaultStatusCheck();
+        _handleExcessCredit();
+        evc.requireAccountAndVaultStatusCheck(address(this));
     }
 
     // _depositUnderlying() requires custom implementation per protocol integration
@@ -294,6 +277,7 @@ abstract contract CollateralVaultBase is VaultBase {
 
         totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
         SafeERC20.safeTransfer(IERC20(asset()), receiver, assets);
+        _handleExcessCredit();
         evc.requireAccountAndVaultStatusCheck(address(this));
     }
 
@@ -309,6 +293,7 @@ abstract contract CollateralVaultBase is VaultBase {
 
         totalAssetsDepositedOrReserved -= assets;
         underlying = IEVault(asset()).redeem(assets, receiver, address(this));
+        _handleExcessCredit();
 
         evc.requireAccountAndVaultStatusCheck(address(this));
     }
@@ -381,24 +366,23 @@ abstract contract CollateralVaultBase is VaultBase {
 
     /// @notice Calculates the amount of excess credit that can be released back to the intermediate vault
     /// @dev Excess credit exists when the relationship between borrower collateral and reserved credit becomes unbalanced
-    /// @dev This is a public wrapper for the internal _canRebalance() function, protected against reentrancy
     /// @dev The calculation varies depending on the external protocol integration
     /// @return uint The amount of excess credit that can be released, denominated in the collateral asset
     function canRebalance() external view nonReentrantRO returns (uint) {
-        return _canRebalance();
+        return totalAssetsDepositedOrReserved - _invariantCollateralAmount();
     }
 
-    function _canRebalance() internal view virtual returns (uint);
+    function _handleExcessCredit() internal virtual;
+
+    function _invariantCollateralAmount() internal view virtual returns (uint);
 
     /// @notice Releases excess credit back to the intermediate vault
     /// @dev Excess credit exists when: liqLTV_twyne * C < safety_buffer * liqLTV_external * (C + C_LP)
     /// @dev Anyone can call this function to rebalance a position
     function rebalance() external callThroughEVC nonReentrant {
         require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
-        totalAssetsDepositedOrReserved -= intermediateVault.repay(_canRebalance(), address(this));
+        _handleExcessCredit();
     }
-
-    function _hasNonNegativeExcessCredit() internal view virtual returns (bool);
 
     function teleport(uint toDeposit, uint toReserve, uint toBorrow) external virtual;
 }

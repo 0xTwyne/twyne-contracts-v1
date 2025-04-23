@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.28;
 
 import {TwyneVaultTestBase, console2} from "./TwyneVaultTestBase.t.sol";
 import "euler-vault-kit/EVault/shared/types/Types.sol";
@@ -22,16 +22,6 @@ interface IWETH is IERC20 {
 }
 
 contract OverCollateralizedTestBase is TwyneVaultTestBase {
-    using TypesLib for uint256;
-
-    address bridgeFactory;
-
-    /**
-     * Assume:
-     * - Twyne user Alice holds WSTETH and wants USDC
-     * - Twyne depositor Bob holds aUSDC, the intermediate asset
-     * - Twyne user Laura holds WSTETH, WSOL, and COMP and wants USDC
-     */
     uint256 aliceKey; // Alice needs a private key for permit2 signing
     address alice;
     address bob = makeAddr("bob"); // benevolent bob, supplies intermediate asset
@@ -45,7 +35,6 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
     MockPriceOracle mockOracle;
     EulerRouter eulerExternalOracle;
 
-    error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed);
     error InvalidInvariant();
 
     VaultManager twyneVaultManager;
@@ -54,7 +43,6 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
     EulerCollateralVault alice_WSTETH_collateral_vault;
     IEVault eeWETH_intermediate_vault;
     IEVault eeWSTETH_intermediate_vault;
-    address dUSDC;
 
     uint constant twyneLiqLTV = 0.98e4;
     uint constant MAXFACTOR = 1e4;
@@ -111,9 +99,26 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
 
     // helper function to mimic frontend functionality in determining how much asset to reserve from the intermediate vault
     function getReservedAssets(uint256 depositAmountWETH, uint256 borrowAmountUSDC, EulerCollateralVault collateralVault) internal view returns (uint reservedAssets) {
-        uint liqLTV_external = uint(IEVault(collateralVault.targetVault()).LTVLiquidation(collateralVault.asset())) * uint(collateralVault.twyneVaultManager().externalLiqBuffers(collateralVault.asset())); // 1e8
+        address targetVault = collateralVault.targetVault();
+        address collateralAsset = collateralVault.asset();
+        uint externalLiqBuffer =  uint(collateralVault.twyneVaultManager().externalLiqBuffers(collateralAsset));
         uint liqLTV_twyne = collateralVault.twyneLiqLTV();
         IEVault intermediateVault = collateralVault.intermediateVault();
+
+        return getReservedAssets(depositAmountWETH, borrowAmountUSDC, targetVault, collateralAsset, externalLiqBuffer, liqLTV_twyne, intermediateVault);
+    }
+
+    function getReservedAssets(
+        uint256 depositAmountWETH,
+        uint256 borrowAmountUSDC,
+        address targetVault,
+        address collateralAsset,
+        uint externalLiqBuffer,
+        uint liqLTV_twyne,
+        IEVault intermediateVault
+    ) internal view returns (uint reservedAssets) {
+
+        uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(collateralAsset)) * externalLiqBuffer; // 1e8
 
         uint LTVdiff = (MAXFACTOR * liqLTV_twyne) - liqLTV_external;
 
@@ -131,7 +136,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         // require(depositAmountWETH * LTVdiff < intermediateVault.cash() * liqLTV_external, InvalidInvariant());
 
         // Set max borrow to B_max = (1-borrow_buffer) * liqLTV_t * C_process
-        uint B_max_eWETH = (1e4 - twyneVaultManager.externalLiqBuffers(collateralVault.asset())) * liqLTV_twyne * depositAmountWETH;
+        uint B_max_eWETH = (1e4 - externalLiqBuffer) * liqLTV_twyne * depositAmountWETH;
         uint B_max_USD = oracleRouter.getQuote(B_max_eWETH, eulerWETH, USD);
         // User sets borrow amount B <= B_max. This is really just a frontend check, we don't need this in contracts
         require(borrowAmountUSDC <= B_max_USD, InvalidInvariant());
@@ -176,10 +181,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         vm.deal(liquidator, 10 ether);
         vm.deal(teleporter, 10 ether);
 
-        dUSDC = IEVault(eulerUSDC).dToken();
-
         // Add labels
-        vm.label(dUSDC, "dUSDC");
         vm.label(eulerUSDC, "eulerUSDC");
         vm.label(eulerWETH, "eulerWETH");
         vm.label(eulerWSTETH, "eulerWSTETH");
@@ -231,9 +233,15 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         deal(address(WETH), liquidator, INITIAL_DEALT_ERC20);
         deal(address(WETH), teleporter, INITIAL_DEALT_ERC20);
 
-        string memory foundryProfile = vm.envString("FOUNDRY_PROFILE");
-        if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("base"))) ||
-        keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("mainnet")))) {
+        if (block.chainid == 1) { // mainnet
+            dealEToken(eulerWETH, alice, INITIAL_DEALT_ETOKEN);
+            dealEToken(eulerWETH, bob, INITIAL_DEALT_ETOKEN);
+            dealEToken(eulerWETH, eve, INITIAL_DEALT_ETOKEN);
+            dealEToken(eulerWETH, laura, INITIAL_DEALT_ETOKEN);
+            dealEToken(eulerWETH, liquidator, INITIAL_DEALT_ETOKEN);
+            dealEToken(eulerWETH, teleporter, 10 ether);
+            badEVKDebtAmount = 10681114649954238078;
+        } else if (block.chainid == 8453) { // base
             dealEToken(eulerWETH, alice, INITIAL_DEALT_ETOKEN);
             dealEToken(eulerWETH, bob, INITIAL_DEALT_ETOKEN);
             dealEToken(eulerWETH, eve, INITIAL_DEALT_ETOKEN);
@@ -241,7 +249,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
             dealEToken(eulerWETH, liquidator, INITIAL_DEALT_ETOKEN);
             dealEToken(eulerWETH, teleporter, 10 ether);
             badEVKDebtAmount = 9286146475215740780;
-        } else if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("sonic")))) {
+        } else if (block.chainid == 146) { // sonic
             // deposit less due to Sonic supply cap
             uint fraction = 20;
             INITIAL_DEALT_ETOKEN /= fraction;

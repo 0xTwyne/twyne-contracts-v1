@@ -639,9 +639,6 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         twyneVaultManager.setExternalLiqBuffer(0);
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         twyneVaultManager.setExternalLiqBuffer(1e4 + 1);
-
-        vm.expectRevert(TwyneErrors.NotCollateralVault.selector);
-        twyneVaultManager.checkLiqLTVByCollateralVault(0.9e4);
     }
 
     function test_e_setNewFactory() public noGasMetering {

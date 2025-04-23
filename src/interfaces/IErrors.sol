@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.28;
 
-abstract contract Errors {
+interface IErrors {
     error AccountStatusLiquidatable(); // 0x89db07ae
     error AssetMismatch(); // 0x83c1010a
     error BorrowExists(); // 0x7818852c

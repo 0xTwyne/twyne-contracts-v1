@@ -8,7 +8,7 @@ import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.
 import {EulerCollateralVault, CollateralVaultBase} from "src/twyne/EulerCollateralVault.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
-import {Errors as TwyneErrors} from "src/twyne/Errors.sol";
+import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";

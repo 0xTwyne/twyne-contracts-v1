@@ -15,7 +15,7 @@ import {Errors as EVCErrors} from "ethereum-vault-connector/Errors.sol";
 import {IRMLinearKink} from "euler-vault-kit/InterestRateModels/IRMLinearKink.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
-import {Errors as TwyneErrors} from "src/twyne/Errors.sol";
+import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";

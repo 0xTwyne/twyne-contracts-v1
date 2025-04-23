@@ -4,9 +4,9 @@ pragma solidity ^0.8.0;
 
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
-import {Errors} from "src/twyne/Errors.sol";
+import {IErrors} from "src/interfaces/IErrors.sol";
 
-contract BridgeHookTarget is Errors {
+contract BridgeHookTarget is IErrors {
     CollateralVaultFactory immutable collateralVaultFactory;
 
     constructor(address _collateralVaultFactory) {

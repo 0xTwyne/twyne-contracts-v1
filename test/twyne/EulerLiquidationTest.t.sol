@@ -8,7 +8,7 @@ import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
-import {Errors as TwyneErrors} from "src/twyne/Errors.sol";
+import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 
 interface IWETH is IERC20 {
     receive() external payable;

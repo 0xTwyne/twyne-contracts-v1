@@ -103,7 +103,6 @@ contract EulerCollateralVault is CollateralVaultBase {
         address __asset = asset();
         address underlyingAsset = IEVault(__asset).asset();
         SafeERC20Lib.safeTransferFrom(IERC20_Euler(underlyingAsset), borrower, address(this), underlying, permit2);
-        SafeERC20.forceApprove(IERC20(underlyingAsset), __asset, type(uint).max);
 
         return IEVault(__asset).deposit(underlying, address(this));
     }

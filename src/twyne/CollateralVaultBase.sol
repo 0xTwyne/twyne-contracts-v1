@@ -11,6 +11,7 @@ import {VaultBase} from "src/twyne/VaultBase.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {SafeERC20Lib, IERC20 as IERC20_Euler} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
+import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 /// @title CollateralVaultBase
 /// @notice Provides general vault functionality applicable to any external integration.
@@ -196,7 +197,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @return uint The maximum amount of collateral asset that can be released back to the intermediate vault
     function maxRelease() public view returns (uint) {
         // this math is the same as EVK's getCurrentOwed() used in repay() to find max repay amount
-        return intermediateVault.debtOf(address(this));
+        return Math.min(intermediateVault.debtOf(address(this)), totalAssetsDepositedOrReserved);
     }
 
     /// @dev This function reserves assets from the intermediate vault.

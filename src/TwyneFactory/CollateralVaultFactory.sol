@@ -71,10 +71,10 @@ contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors {
         // collateral is allowed because the above line will revert if collateral is not recognized
         require(vaultManager.isAllowedTargetVault(intermediateVault, _targetVault), NotIntermediateVault());
 
-        vault = address(new BeaconProxy{salt: keccak256(abi.encodePacked(msg.sender, nonce[msg.sender]++))}(collateralVaultBeacon[_targetVault], ""));
+        address msgSender = _msgSender();
+        vault = address(new BeaconProxy{salt: keccak256(abi.encodePacked(msgSender, nonce[msgSender]++))}(collateralVaultBeacon[_targetVault], ""));
         isCollateralVault[vault] = true;
 
-        address msgSender = _msgSender();
         collateralVaults[msgSender].push(vault);
 
         CollateralVaultBase(vault).initialize(IERC20(_asset), msgSender, _liqLTV, vaultManager);

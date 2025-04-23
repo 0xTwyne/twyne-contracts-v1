@@ -237,8 +237,7 @@ contract EulerCollateralVault is CollateralVaultBase {
     function teleport(uint toDeposit, uint toReserve, uint toBorrow) external override onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
 
-        totalAssetsDepositedOrReserved += toDeposit + toReserve;
-        intermediateVault.borrow(toReserve, address(this));
+        totalAssetsDepositedOrReserved += toDeposit + intermediateVault.borrow(toReserve, address(this));
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
         items[0] = IEVC.BatchItem({

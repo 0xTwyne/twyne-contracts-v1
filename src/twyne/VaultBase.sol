@@ -19,7 +19,9 @@ abstract contract VaultBase is EVCUtil, ReentrancyGuardUpgradeable, IErrors, IVa
 
     constructor(address _evc) EVCUtil(_evc) {}
 
-    function __VaultBase_init() internal onlyInitializing {}
+    function __VaultBase_init() internal onlyInitializing {
+        __ReentrancyGuard_init();
+    }
 
     /// @notice Prevents read-only reentrancy (should be used for view functions)
     modifier nonReentrantRO() virtual {

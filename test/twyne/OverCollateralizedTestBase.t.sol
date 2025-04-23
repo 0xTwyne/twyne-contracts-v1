@@ -111,7 +111,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
 
     // helper function to mimic frontend functionality in determining how much asset to reserve from the intermediate vault
     function getReservedAssets(uint256 depositAmountWETH, uint256 borrowAmountUSDC, EulerCollateralVault collateralVault) internal view returns (uint reservedAssets) {
-        uint liqLTV_external = uint(IEVault(collateralVault.targetVault()).LTVLiquidation(collateralVault.asset())) * uint(collateralVault.twyneVaultManager().externalLiqBuffer()); // 1e8
+        uint liqLTV_external = uint(IEVault(collateralVault.targetVault()).LTVLiquidation(collateralVault.asset())) * uint(collateralVault.twyneVaultManager().externalLiqBuffers(collateralVault.asset())); // 1e8
         uint liqLTV_twyne = collateralVault.twyneLiqLTV();
         IEVault intermediateVault = collateralVault.intermediateVault();
 
@@ -131,7 +131,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         // require(depositAmountWETH * LTVdiff < intermediateVault.cash() * liqLTV_external, InvalidInvariant());
 
         // Set max borrow to B_max = (1-borrow_buffer) * liqLTV_t * C_process
-        uint B_max_eWETH = (1e4 - twyneVaultManager.externalLiqBuffer()) * liqLTV_twyne * depositAmountWETH;
+        uint B_max_eWETH = (1e4 - twyneVaultManager.externalLiqBuffers(collateralVault.asset())) * liqLTV_twyne * depositAmountWETH;
         uint B_max_USD = oracleRouter.getQuote(B_max_eWETH, eulerWETH, USD);
         // User sets borrow amount B <= B_max. This is really just a frontend check, we don't need this in contracts
         require(borrowAmountUSDC <= B_max_USD, InvalidInvariant());
@@ -146,8 +146,10 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         vm.startPrank(admin);
 
         twyneVaultManager = new VaultManager(admin, address(collateralVaultFactory));
-        twyneVaultManager.setMaxLiquidationLTV(0.98e4);
-        twyneVaultManager.setExternalLiqBuffer(0.95e4);
+        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 0.98e4);
+        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
+        twyneVaultManager.setMaxLiquidationLTV(eulerWSTETH, 0.98e4);
+        twyneVaultManager.setExternalLiqBuffer(eulerWSTETH, 0.95e4);
 
         healthViewer = new HealthStatViewer();
 

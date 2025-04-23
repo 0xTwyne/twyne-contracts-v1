@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.28;
 
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -82,7 +82,7 @@ contract MockCollateralVault is CollateralVaultBase {
     function _canRebalance() internal view override returns (uint excessCredit) {
         uint vaultAssets = totalAssetsDepositedOrReserved;
         uint userCollateral = vaultAssets - maxRelease();
-        uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(asset())) * uint(twyneVaultManager.externalLiqBuffer()); // 1e8 precision
+        uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(asset())) * uint(twyneVaultManager.externalLiqBuffers(asset())); // 1e8 precision
 
         // rebalance() isn't protected by invariant check (no requireVaultStatusCheck in rebalance()).
         // Thus, we underestimate the excess credit to release so that after its release,
@@ -131,7 +131,7 @@ contract MockCollateralVault is CollateralVaultBase {
         (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
 
         // externalCollateralValueScaledByLiqLTV is actual collateral value * externalLiquidationLTV, so it's lower than the real value
-        if (externalBorrowDebtValue * MAXFACTOR > uint(twyneVaultManager.externalLiqBuffer()) * externalCollateralValueScaledByLiqLTV) {
+        if (externalBorrowDebtValue * MAXFACTOR > uint(twyneVaultManager.externalLiqBuffers(asset())) * externalCollateralValueScaledByLiqLTV) {
             // note to avoid divide by zero case, don't divide by externalCollateralValueScaledByLiqLTV
             return true;
         }
@@ -180,7 +180,7 @@ contract MockCollateralVault is CollateralVaultBase {
 
         if (_maxRepay > 0) {
             liquidatorReward = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
-                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLiqLTV(),
+                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(asset()),
                 targetAsset,
                 IEVault(_asset).asset()
             );
@@ -233,12 +233,12 @@ contract MockCollateralVault is CollateralVaultBase {
         evc.requireVaultStatusCheck();
     }
 
-    /// @notice Checks if the vault's current state maintains required invariants for safe operation
-    /// @return bool Returns true if all invariants are maintained, false otherwise
+    /// @notice Checks if the vault's current state has non-negative excess credit
+    /// @return bool Returns true if excess credit is non-negative, false otherwise
     function _hasNonNegativeExcessCredit() internal view override returns (bool) {
         uint vaultAssets = totalAssetsDepositedOrReserved;
         uint userCollateral = vaultAssets - maxRelease();
-        uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(asset())) * uint(twyneVaultManager.externalLiqBuffer()); // 1e8
+        uint liqLTV_external = uint(IEVault(targetVault).LTVLiquidation(asset())) * uint(twyneVaultManager.externalLiqBuffers(asset())); // 1e8
 
         return (vaultAssets * liqLTV_external >= userCollateral * twyneLiqLTV * MAXFACTOR);
     }

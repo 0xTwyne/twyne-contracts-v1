@@ -58,7 +58,7 @@ contract HealthStatViewer {
         // extHF tracks liquidation condition 1, where the external protocol's liquidation limit is nearly hit
         if (externalBorrowDebtValue == 0) extHF = type(uint).max;
         else {
-            extHF = uint(twyneVaultManager.externalLiqBuffer()) * 1e18 * externalCollateralValueScaledByLiqLTV / (MAXFACTOR * externalBorrowDebtValue);
+            extHF = uint(twyneVaultManager.externalLiqBuffers(asset)) * 1e18 * externalCollateralValueScaledByLiqLTV / (MAXFACTOR * externalBorrowDebtValue);
         }
 
         uint vaultOwnedCollateralAmount = EulerCollateralVault(collateralVault).totalAssetsDepositedOrReserved();

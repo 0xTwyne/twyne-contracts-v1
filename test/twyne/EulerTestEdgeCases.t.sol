@@ -631,14 +631,15 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         vm.expectRevert(TwyneErrors.AssetMismatch.selector);
         twyneVaultManager.setLTV(eeWSTETH_intermediate_vault, address(alice_collateral_vault), 6500, 7500, 0);
 
-        twyneVaultManager.setMaxLiquidationLTV(1e4);
+        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 1e4);
+        twyneVaultManager.setMaxLiquidationLTV(eulerWSTETH, 1e4);
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.setMaxLiquidationLTV(1e4 + 1);
+        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 1e4 + 1);
 
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.setExternalLiqBuffer(0);
+        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0);
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.setExternalLiqBuffer(1e4 + 1);
+        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 1e4 + 1);
     }
 
     function test_e_setNewFactory() public noGasMetering {

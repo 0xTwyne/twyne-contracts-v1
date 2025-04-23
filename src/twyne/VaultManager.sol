@@ -63,6 +63,7 @@ contract VaultManager is Ownable, IErrors {
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
     function setAllowedTargetVault(address _intermediateVault, address _targetVault) external onlyOwner {
+        require(IEVault(_intermediateVault).unitOfAccount() == IEVault(_targetVault).unitOfAccount());
         isAllowedTargetVault[_intermediateVault][_targetVault] = true;
         allowedTargetVaultList[_intermediateVault].push(_targetVault);
     }

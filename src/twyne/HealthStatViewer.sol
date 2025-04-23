@@ -18,7 +18,7 @@ contract HealthStatViewer {
         view
         returns (uint healthFactor, uint collateralValue, uint liabilityValue)
     {
-        (collateralValue, liabilityValue) = IEVault(EulerCollateralVault(collateralVault).twyneVaultManager().getIntermediateVault(EulerCollateralVault(collateralVault).asset())).accountLiquidity(collateralVault, true);
+        (collateralValue, liabilityValue) = IEVault(EulerCollateralVault(collateralVault).intermediateVault()).accountLiquidity(collateralVault, true);
 
         if (liabilityValue == 0) {
             healthFactor = type(uint).max;

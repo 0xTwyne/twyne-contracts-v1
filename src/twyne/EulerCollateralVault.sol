@@ -175,10 +175,9 @@ contract EulerCollateralVault is CollateralVaultBase {
                 IEVault(__asset).asset()
             );
 
-            liquidatorReward = IEVault(__asset).convertToShares(liquidatorReward);
+            liquidatorReward = Math.min(_collateralBalance, IEVault(__asset).convertToShares(liquidatorReward));
         }
 
-        // TODO can this arithmetic revert?
         uint releaseAmount = Math.min(_collateralBalance - liquidatorReward, _maxRelease);
         uint borrowerClaim = _collateralBalance - releaseAmount - liquidatorReward;
 

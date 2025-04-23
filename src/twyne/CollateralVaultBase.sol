@@ -78,7 +78,7 @@ abstract contract CollateralVaultBase is VaultBase {
         intermediateVault = IEVault(_intermediateVault);
 
         // checkLiqLTV must happen after targetVault() and asset() return meaningful values
-        __vaultManager.checkLiqLTVByCollateralVault(__liqLTV);
+        __vaultManager.checkLiqLTV(__liqLTV, targetVault, address(__asset));
         twyneLiqLTV = __liqLTV;
         SafeERC20.forceApprove(IERC20(__asset), _intermediateVault, type(uint).max); // necessary for EVK repay()
         SafeERC20.forceApprove(IERC20(IEVault(address(__asset)).asset()), address(__asset), type(uint).max); // necessary for _depositUnderlying()
@@ -320,7 +320,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @notice allow the user to set their own vault's LTV
     function setTwyneLiqLTV(uint _ltv) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
-        twyneVaultManager.checkLiqLTVByCollateralVault(_ltv);
+        twyneVaultManager.checkLiqLTV(_ltv, targetVault, _asset);
         twyneLiqLTV = _ltv;
         evc.requireAccountAndVaultStatusCheck(address(this));
     }

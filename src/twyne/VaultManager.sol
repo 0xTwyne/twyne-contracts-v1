@@ -142,24 +142,9 @@ contract VaultManager is Ownable, IErrors {
     /// @param _liqLTV The LTV that the user wants to use for their collateral vault.
     /// @param _targetVault The target vault used for the borrow by collateral vault.
     /// @param _collateralAddress The collateral asset used by collateral vault.
-    /// @return isAllowedLTV bool indicating whether the user-set LTV is within proper bounds.
-    function checkLiqLTV(uint _liqLTV, address _targetVault, address _collateralAddress) public view returns (bool isAllowedLTV) {
+    function checkLiqLTV(uint _liqLTV, address _targetVault, address _collateralAddress) public view {
         uint16 minLTV = IEVault(_targetVault).LTVLiquidation(_collateralAddress);
         require(uint(minLTV) * uint(externalLiqBuffer) <= _liqLTV * MAXFACTOR && _liqLTV <= maxTwyneLiqLTV, ValueOutOfRange());
-        return true;
-    }
-
-    /// @notice Checks that the user-set LTV is within the min and max bounds.
-    /// @param _liqLTV The LTV that the user wants to use for their collateral vault.
-    /// @return isAllowedLTV bool indicating whether the user-set LTV is within proper bounds.
-    /// @dev Can be called only by collateral vaults.
-    function checkLiqLTVByCollateralVault(uint _liqLTV) external view returns (bool isAllowedLTV) {
-        require(CollateralVaultFactory(collateralVaultFactory).isCollateralVault(msg.sender), NotCollateralVault());
-        // Twyne assumes single target asset per target vault.
-        address _targetVault = CollateralVaultBase(msg.sender).targetVault();
-        address _collateralAddress = CollateralVaultBase(msg.sender).asset();
-
-        return checkLiqLTV(_liqLTV, _targetVault, _collateralAddress);
     }
 
     receive() external payable {}

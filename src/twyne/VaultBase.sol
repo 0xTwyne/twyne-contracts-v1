@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.28;
 
 import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
@@ -60,9 +60,9 @@ abstract contract VaultBase is EVCUtil, ReentrancyGuardUpgradeable, IErrors, IVa
 
     /// @notice Creates a snapshot of the vault state
     /// @dev Must be overridden by child contracts
-    function doCreateVaultSnapshot() internal virtual returns (uint snapshot);
+    function doCreateVaultSnapshot() internal virtual returns (uint);
 
     /// @notice Checks the vault status
     /// @dev Must be overridden by child contracts
-    function doCheckVaultStatus(uint snapshot) internal virtual;
+    function doCheckVaultStatus(uint) internal virtual;
 }

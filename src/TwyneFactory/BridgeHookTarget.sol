@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.28;
 
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";

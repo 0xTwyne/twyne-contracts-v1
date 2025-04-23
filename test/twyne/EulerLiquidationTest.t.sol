@@ -246,15 +246,16 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             data: abi.encodeCall(alice_collateral_vault.handleExternalLiquidation, ())
         });
 
-        // Vault status check reverts since `_canLiquidate()` reverts.
-        // `totalAssetsOrDepositedReserverd(0) - maxRelease()(>0)` reverts.
-        vm.expectRevert();
+        // Can call handleExternalLiquidation() in a separate batch from intermediateVault.liquidate()
+        // but handleExternalLiquidation() must be called before liquidate()
         evc.batch(items);
 
-        // Need to call liquidate() on intermediate vault after handleExternalLiquidation()
-        IEVC.BatchItem[] memory items1 = new IEVC.BatchItem[](2);
-        items1[0] = items[0];
-        items1[1] = IEVC.BatchItem({
+        // Confirm collateral vault is empty
+        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
+
+        // Need to call liquidate() on intermediate vault after handleExternalLiquidation() to settle accounting
+        IEVC.BatchItem[] memory items1 = new IEVC.BatchItem[](1);
+        items1[0] = IEVC.BatchItem({
             onBehalfOfAccount: newLiquidator,
             targetContract: address(alice_collateral_vault.intermediateVault()),
             value: 0,
@@ -264,6 +265,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         evc.batch(items1);
         vm.stopPrank();
 
+        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
         assertEq(alice_collateral_vault.borrower(), address(0));
         assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0);
         assertEq(alice_collateral_vault.maxRelease(), 0);

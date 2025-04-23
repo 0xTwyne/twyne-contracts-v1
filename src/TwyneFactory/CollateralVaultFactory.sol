@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.28;
 
 import {Ownable, Context} from "openzeppelin-contracts/access/Ownable.sol";
 import {Pausable} from "openzeppelin-contracts/utils/Pausable.sol";
@@ -13,8 +13,6 @@ import {IErrors} from "src/interfaces/IErrors.sol";
 
 contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors {
     event CollateralVaultCreated(address vault);
-
-    address constant USD = address(840);
 
     mapping(address targetVault => address beacon) public collateralVaultBeacon;
     mapping(address => bool) public isCollateralVault;

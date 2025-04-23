@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.28;
 
 import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";

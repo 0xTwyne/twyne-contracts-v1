@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.28;
 
 import {PausableUpgradeable} from "openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
@@ -88,10 +88,10 @@ abstract contract CollateralVaultBase is VaultBase {
     }
 
     function initialize(
-        IERC20 _asset,
-        address _borrower,
-        uint _liqLTV,
-        VaultManager _vaultManager
+        IERC20 __asset,
+        address __borrower,
+        uint __liqLTV,
+        VaultManager __vaultManager
     ) external virtual;
 
     ///
@@ -285,7 +285,13 @@ abstract contract CollateralVaultBase is VaultBase {
         address receiver
     ) public onlyBorrowerAndNotExtLiquidated nonReentrant {
         createVaultSnapshot();
-        totalAssetsDepositedOrReserved -= assets;
+
+        uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
+        if (assets == type(uint).max) {
+            assets = _totalAssetsDepositedOrReserved - maxRelease();
+        }
+
+        totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
         SafeERC20.safeTransfer(IERC20(asset()), receiver, assets);
         evc.requireAccountAndVaultStatusCheck(address(this));
     }

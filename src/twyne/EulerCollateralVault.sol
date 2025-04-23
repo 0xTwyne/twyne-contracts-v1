@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.28;
 
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -28,19 +28,19 @@ contract EulerCollateralVault is CollateralVaultBase {
         _disableInitializers();
     }
 
-    /// @param _asset address of vault asset
-    /// @param _borrower address of vault owner
-    /// @param _liqLTV user-specified target LTV
-    /// @param _vaultManager VaultManager contract address
+    /// @param __asset address of vault asset
+    /// @param __borrower address of vault owner
+    /// @param __liqLTV user-specified target LTV
+    /// @param __vaultManager VaultManager contract address
     function initialize(
-        IERC20 _asset,
-        address _borrower,
-        uint _liqLTV,
-        VaultManager _vaultManager
+        IERC20 __asset,
+        address __borrower,
+        uint __liqLTV,
+        VaultManager __vaultManager
     ) external initializer override {
-        __CollateralVaultBase_init(_asset, _borrower, _liqLTV, _vaultManager);
+        __CollateralVaultBase_init(__asset, __borrower, __liqLTV, __vaultManager);
 
-        eulerEVC.enableCollateral(address(this), address(_asset));
+        eulerEVC.enableCollateral(address(this), address(__asset));
         eulerEVC.enableController(address(this), targetVault);
         SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max);
     }
@@ -100,12 +100,12 @@ contract EulerCollateralVault is CollateralVaultBase {
 
     /// @notice First receives the unwrapped token from the borrower, then sends borrowed target assets to Euler
     function _depositUnderlying(uint underlying) internal override returns (uint) {
-        address _asset = asset();
-        address underlyingAsset = IEVault(_asset).asset();
+        address __asset = asset();
+        address underlyingAsset = IEVault(__asset).asset();
         SafeERC20Lib.safeTransferFrom(IERC20_Euler(underlyingAsset), borrower, address(this), underlying, permit2);
-        SafeERC20.forceApprove(IERC20(underlyingAsset), _asset, type(uint).max);
+        SafeERC20.forceApprove(IERC20(underlyingAsset), __asset, type(uint).max);
 
-        return IEVault(_asset).deposit(underlying, address(this));
+        return IEVault(__asset).deposit(underlying, address(this));
     }
 
     ///
@@ -166,17 +166,17 @@ contract EulerCollateralVault is CollateralVaultBase {
 
     /// @notice splits remaining collateral between liquidator, intermediate vault and borrow
     function splitCollateralAfterExtLiq(uint _collateralBalance, uint _maxRepay, uint _maxRelease) internal view returns (uint, uint, uint) {
-        address _asset = asset();
+        address __asset = asset();
         uint liquidatorReward;
 
         if (_maxRepay > 0) {
             liquidatorReward = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
                 _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLiqLTV(),
                 targetAsset,
-                IEVault(_asset).asset()
+                IEVault(__asset).asset()
             );
 
-            liquidatorReward = IEVault(_asset).convertToShares(liquidatorReward);
+            liquidatorReward = IEVault(__asset).convertToShares(liquidatorReward);
         }
 
         // TODO can this arithmetic revert?
@@ -189,8 +189,8 @@ contract EulerCollateralVault is CollateralVaultBase {
     /// @notice to be called if the vault is liquidated by Euler
     function handleExternalLiquidation() external override callThroughEVC nonReentrant {
         createVaultSnapshot();
-        address _asset = asset();
-        uint amount = IERC20(_asset).balanceOf(address(this));
+        address __asset = asset();
+        uint amount = IERC20(__asset).balanceOf(address(this));
         require(totalAssetsDepositedOrReserved > amount, NotExternallyLiquidated());
 
         address liquidator = _msgSender();
@@ -204,16 +204,17 @@ contract EulerCollateralVault is CollateralVaultBase {
             IEVault(targetVault).repay(_maxRepay, address(this));
 
             // step 2: transfer collateral reward to liquidator
-            SafeERC20Lib.safeTransfer(IERC20_Euler(_asset), liquidator, liquidatorReward);
+            SafeERC20Lib.safeTransfer(IERC20_Euler(__asset), liquidator, liquidatorReward);
         }
 
         if (borrowerClaim > 0) {
             // step 3: return some collateral to borrower
-            SafeERC20Lib.safeTransfer(IERC20_Euler(_asset), borrower, borrowerClaim);
+            SafeERC20Lib.safeTransfer(IERC20_Euler(__asset), borrower, borrowerClaim);
         }
 
         if (releaseAmount > 0) {
-            // step 4: release remaining assets, socializing bad debt among credit LPs
+            // step 4: release remaining assets. Any non-zero bad debt left after this
+            // needs to be socialized via intermediateVault.liquidate in the same batch.
             intermediateVault.repay(releaseAmount, address(this));
         }
 
@@ -224,8 +225,8 @@ contract EulerCollateralVault is CollateralVaultBase {
         evc.requireVaultStatusCheck();
     }
 
-    /// @notice Checks if the vault's current state maintains required invariants for safe operation
-    /// @return bool Returns true if all invariants are maintained, false otherwise
+    /// @notice Checks if the vault's current state has non-negative excess credit
+    /// @return bool Returns true if excess credit is non-negative, false otherwise
     function _hasNonNegativeExcessCredit() internal view override returns (bool) {
         uint vaultAssets = totalAssetsDepositedOrReserved;
         uint userCollateral = vaultAssets - maxRelease();

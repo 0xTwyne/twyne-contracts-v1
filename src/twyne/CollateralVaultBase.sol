@@ -33,8 +33,8 @@ abstract contract CollateralVaultBase is VaultBase {
     IEVault public intermediateVault;
     address private _asset;
 
-    string public name;
-    string public symbol;
+    string public constant name = "Collateral Vault";
+    string public constant symbol = "CV";
 
     uint[50] private __gap;
 
@@ -54,8 +54,6 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @param _targetVault address of the target vault to borrow from
     constructor(address _evc, address _targetVault) VaultBase(_evc) {
         targetVault = _targetVault;
-        name = "Collateral Vault";
-        symbol = "CV";
     }
 
     /// @param __asset address of vault asset

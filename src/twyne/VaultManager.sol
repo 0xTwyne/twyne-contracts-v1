@@ -6,13 +6,14 @@ import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
+import {IEvents} from "src/interfaces/IEvents.sol";
 import {RevertBytes} from "euler-vault-kit/EVault/shared/lib/RevertBytes.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
 /// @notice Manages twyne parameters that affect it globally: assets allowed, LTVs, interest rates.
 /// To be owned by Twyne multisig.
-contract VaultManager is Ownable, IErrors {
+contract VaultManager is Ownable, IErrors, IEvents {
     uint internal constant MAXFACTOR = 1e4;
 
     address public collateralVaultFactory;
@@ -39,6 +40,7 @@ contract VaultManager is Ownable, IErrors {
     /// @notice Set oracleRouter address. Governance-only.
     function setOracleRouter(address _oracle) external onlyOwner {
         oracleRouter = EulerRouter(_oracle);
+        emit T_SetOracleRouter(_oracle);
     }
 
     /// @notice Get a collateral vault's intermediate vault.
@@ -56,6 +58,7 @@ contract VaultManager is Ownable, IErrors {
         address creditAsset = _intermediateVault.asset();
         require(intermediateVaults[creditAsset] == address(0), IntermediateVaultAlreadySet());
         intermediateVaults[creditAsset] = address(_intermediateVault);
+        emit T_SetIntermediateVault(address(_intermediateVault));
     }
 
     /// @notice Set an allowed target vault for a specific intermediate vault. Governance-only.
@@ -65,6 +68,7 @@ contract VaultManager is Ownable, IErrors {
         require(IEVault(_intermediateVault).unitOfAccount() == IEVault(_targetVault).unitOfAccount());
         isAllowedTargetVault[_intermediateVault][_targetVault] = true;
         allowedTargetVaultList[_intermediateVault].push(_targetVault);
+        emit T_AddAllowedTargetVault(_intermediateVault, _targetVault);
     }
 
     /// @notice Remove an allowed target vault for a specific intermediate vault. Governance-only.
@@ -79,6 +83,7 @@ contract VaultManager is Ownable, IErrors {
         uint lastIndex = allowedTargetVaultList[_intermediateVault].length - 1;
         if (_index != lastIndex) allowedTargetVaultList[_intermediateVault][_index] = allowedTargetVaultList[_intermediateVault][lastIndex];
         allowedTargetVaultList[_intermediateVault].pop();
+        emit T_RemoveAllowedTargetVault(_intermediateVault, _targetVault, _index);
     }
 
     /// @notice Return the length of allowedTargetVaultList. Useful for frontend.
@@ -91,6 +96,7 @@ contract VaultManager is Ownable, IErrors {
     function setMaxLiquidationLTV(address _collateralAddress, uint16 _ltv) external onlyOwner {
         require(_ltv <= MAXFACTOR, ValueOutOfRange());
         maxTwyneLTVs[_collateralAddress] = _ltv;
+        emit T_SetMaxLiqLTV(_collateralAddress, _ltv);
     }
 
     /// @notice Set protocol-wide externalLiqBuffer. Governance-only.
@@ -98,12 +104,14 @@ contract VaultManager is Ownable, IErrors {
     function setExternalLiqBuffer(address _collateralAddress, uint16 _liqBuffer) external onlyOwner {
         require(0 != _liqBuffer  && _liqBuffer <= MAXFACTOR, ValueOutOfRange());
         externalLiqBuffers[_collateralAddress] = _liqBuffer;
+        emit T_SetExternalLiqBuffer(_collateralAddress, _liqBuffer);
     }
 
     /// @notice Set new collateralVaultFactory address. Governance-only.
     /// @param _factory new collateralVaultFactory address.
     function setCollateralVaultFactory(address _factory) external onlyOwner {
         collateralVaultFactory = _factory;
+        emit T_SetCollateralVaultFactory(_factory);
     }
 
     /// @notice Set new LTV values for an intermediate vault by calling EVK.setLTV(). Callable by governance or collateral vault factory.
@@ -118,6 +126,7 @@ contract VaultManager is Ownable, IErrors {
     {
         require(CollateralVaultBase(_collateralVault).asset() == _intermediateVault.asset(), AssetMismatch());
         _intermediateVault.setLTV(_collateralVault, _borrowLimit, _liquidationLimit, _rampDuration);
+        emit T_SetLTV(address(_intermediateVault), _collateralVault, _borrowLimit, _liquidationLimit, _rampDuration);
     }
 
     /// @notice Set new oracleRouter resolved vault value. Callable by governance or collateral vault factory.
@@ -127,6 +136,7 @@ contract VaultManager is Ownable, IErrors {
     /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.
     function setOracleResolvedVault(address _vault, bool _allow) external onlyCollateralVaultFactoryOrOwner {
         oracleRouter.govSetResolvedVault(_vault, _allow);
+        emit T_SetOracleResolvedVault(_vault, _allow);
     }
 
     /// @notice Perform an arbitrary external call. Governance-only.
@@ -135,6 +145,7 @@ contract VaultManager is Ownable, IErrors {
     function doCall(address to, uint value, bytes memory data) external payable onlyOwner {
         (bool success, bytes memory _data) = to.call{value: value}(data);
         if (!success) RevertBytes.revertBytes(_data);
+        emit T_DoCall(to, value, data);
     }
 
     /// @notice Checks that the user-set LTV is within the min and max bounds.

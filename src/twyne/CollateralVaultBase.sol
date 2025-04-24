@@ -165,6 +165,7 @@ abstract contract CollateralVaultBase is VaultBase {
         createVaultSnapshot();
         _borrow(_targetAmount, _receiver);
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_Borrow(_targetAmount, _receiver);
     }
 
     /// @notice Repays debt owed to the external lending protocol
@@ -185,6 +186,7 @@ abstract contract CollateralVaultBase is VaultBase {
 
         _repay(_amount);
         evc.requireVaultStatusCheck();
+        emit T_Repay(_amount);
     }
 
     ///
@@ -241,6 +243,7 @@ abstract contract CollateralVaultBase is VaultBase {
         totalAssetsDepositedOrReserved += assets;
         _handleExcessCredit();
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_Deposit(assets);
     }
 
     /// @notice Deposits a certain amount of underlying asset for a receiver.
@@ -255,6 +258,7 @@ abstract contract CollateralVaultBase is VaultBase {
         totalAssetsDepositedOrReserved += _depositUnderlying(underlying);
         _handleExcessCredit();
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_DepositUnderlying(underlying);
     }
 
     // _depositUnderlying() requires custom implementation per protocol integration
@@ -279,6 +283,7 @@ abstract contract CollateralVaultBase is VaultBase {
         SafeERC20.safeTransfer(IERC20(asset()), receiver, assets);
         _handleExcessCredit();
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_Withdraw(assets, receiver);
     }
 
     /// @notice Withdraw a certain amount of collateral and transfers collateral asset's underlying asset to receiver.
@@ -296,6 +301,7 @@ abstract contract CollateralVaultBase is VaultBase {
         _handleExcessCredit();
 
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_RedeemUnderlying(assets, receiver);
     }
 
     ///
@@ -308,6 +314,7 @@ abstract contract CollateralVaultBase is VaultBase {
         twyneVaultManager.checkLiqLTV(_ltv, targetVault, _asset);
         twyneLiqLTV = _ltv;
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_SetTwyneLiqLTV(_ltv);
     }
 
     /// @notice check if a vault can be liquidated
@@ -382,6 +389,7 @@ abstract contract CollateralVaultBase is VaultBase {
     function rebalance() external callThroughEVC nonReentrant {
         require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
         _handleExcessCredit();
+        emit T_Rebalance();
     }
 
     function teleport(uint toDeposit, uint toReserve, uint toBorrow) external virtual;

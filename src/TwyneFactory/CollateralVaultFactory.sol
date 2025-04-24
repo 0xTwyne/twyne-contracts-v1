@@ -10,10 +10,9 @@ import {VaultManager} from "src/twyne/VaultManager.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
+import {IEvents} from "src/interfaces/IEvents.sol";
 
-contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors {
-    event CollateralVaultCreated(address vault);
-
+contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors, IEvents {
     mapping(address targetVault => address beacon) public collateralVaultBeacon;
     mapping(address => bool) public isCollateralVault;
 
@@ -33,22 +32,26 @@ contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors {
     /// @notice Set a new vault manager address. Governance-only.
     function setVaultManager(address _manager) external onlyOwner {
         vaultManager = VaultManager(payable(_manager));
+        emit T_SetVaultManager(_manager);
     }
 
     /// @notice Set a new beacon address for a specific target vault. Governance-only.
     function setBeacon(address targetVault, address beacon) external onlyOwner {
         collateralVaultBeacon[targetVault] = beacon;
+        emit T_SetBeacon(targetVault, beacon);
     }
 
     /// @notice callable only by a collateral vault in the case where it has been liquidated
     function setCollateralVaultLiquidated(address liquidator) external {
         require(isCollateralVault[msg.sender], NotIntermediateVault());
         collateralVaults[liquidator].push(msg.sender);
+        emit T_SetCollateralVaultLiquidated(msg.sender, liquidator);
     }
 
     /// @dev pause deposit and borrowing via collateral vault
     function pause(bool p) external onlyOwner {
         p ? _pause() : _unpause();
+        emit T_FactoryPause(p);
     }
 
     function _msgSender() internal view override(Context, EVCUtil) returns (address) {
@@ -83,6 +86,6 @@ contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors {
         // during normal operation. It's allowed only when vault is externally liquidated and that too it's to settle bad debt.
         vaultManager.setLTV(IEVault(intermediateVault), vault, 1e4, 1e4, 0);
 
-        emit CollateralVaultCreated(vault);
+        emit T_CollateralVaultCreated(vault);
     }
 }

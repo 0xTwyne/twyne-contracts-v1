@@ -313,6 +313,7 @@ abstract contract CollateralVaultBase is VaultBase {
         createVaultSnapshot();
         twyneVaultManager.checkLiqLTV(_ltv, targetVault, _asset);
         twyneLiqLTV = _ltv;
+        _handleExcessCredit();
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_SetTwyneLiqLTV(_ltv);
     }
@@ -392,5 +393,5 @@ abstract contract CollateralVaultBase is VaultBase {
         emit T_Rebalance();
     }
 
-    function teleport(uint toDeposit, uint toReserve, uint toBorrow) external virtual;
+    function teleport(uint toDeposit, uint toBorrow) external virtual;
 }

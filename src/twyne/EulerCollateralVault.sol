@@ -232,10 +232,11 @@ contract EulerCollateralVault is CollateralVaultBase {
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault
-    function teleport(uint toDeposit, uint toReserve, uint toBorrow) external override onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
+    function teleport(uint toDeposit, uint toBorrow) external override onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
 
-        totalAssetsDepositedOrReserved += toDeposit + intermediateVault.borrow(toReserve, address(this));
+        totalAssetsDepositedOrReserved += toDeposit;
+        _handleExcessCredit();
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
         items[0] = IEVC.BatchItem({
@@ -259,6 +260,6 @@ contract EulerCollateralVault is CollateralVaultBase {
         eulerEVC.batch(items);
 
         evc.requireAccountAndVaultStatusCheck(address(this));
-        emit T_Teleport(toDeposit, toReserve, toBorrow);
+        emit T_Teleport(toDeposit, toBorrow);
     }
 }

@@ -22,7 +22,7 @@ interface IEvents {
     event T_CollateralVaultInitialized();
     event T_ControllerDisabled();
     event T_HandleExternalLiquidation();
-    event T_Teleport(uint toDeposit, uint toReserve, uint toBorrow);
+    event T_Teleport(uint toDeposit, uint toBorrow);
     // VaultManager
     event T_SetOracleRouter(address indexed newOracleRouter);
     event T_SetIntermediateVault(address indexed intermediateVault);

@@ -43,6 +43,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         eulerEVC.enableCollateral(address(this), address(__asset));
         eulerEVC.enableController(address(this), targetVault);
         SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max);
+        emit T_CollateralVaultInitialized();
     }
 
     /// @notice Disables the controller.
@@ -50,6 +51,7 @@ contract EulerCollateralVault is CollateralVaultBase {
     /// @dev required by IVault inheritance of VaultBase
     function disableController() external override callThroughEVC nonReentrant {
         evc.disableController(_msgSender());
+        emit T_ControllerDisabled();
     }
 
     /// @dev increment the version for proxy upgrades
@@ -226,6 +228,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         delete borrower;
 
         evc.requireVaultStatusCheck();
+        emit T_HandleExternalLiquidation();
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault
@@ -256,5 +259,6 @@ contract EulerCollateralVault is CollateralVaultBase {
         eulerEVC.batch(items);
 
         evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_Teleport(toDeposit, toReserve, toBorrow);
     }
 }

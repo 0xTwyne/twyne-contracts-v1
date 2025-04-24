@@ -5,6 +5,7 @@ pragma solidity ^0.8.28;
 import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
+import {IEvents} from "src/interfaces/IEvents.sol";
 import {IVault} from "ethereum-vault-connector/interfaces/IVault.sol";
 
 /// @title VaultBase
@@ -13,7 +14,7 @@ import {IVault} from "ethereum-vault-connector/interfaces/IVault.sol";
 /// It declares functions that must be defined in the child contract in order to
 /// correctly implement the controller release, vault status snapshotting and account/vaults
 /// status checks.
-abstract contract VaultBase is EVCUtil, ReentrancyGuardUpgradeable, IErrors, IVault {
+abstract contract VaultBase is EVCUtil, ReentrancyGuardUpgradeable, IErrors, IEvents, IVault {
     uint private snapshot;
     uint[50] private __gap;
 

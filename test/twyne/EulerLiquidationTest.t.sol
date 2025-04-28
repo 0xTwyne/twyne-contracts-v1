@@ -360,6 +360,8 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         });
         assertTrue(alice_collateral_vault.isExternallyLiquidated());
 
+        (uint256 collateralValue,) = IEVault(eulerUSDC).accountLiquidity(address(alice_collateral_vault), false);
+
         uint collateralToDeposit = alice_collateral_vault.totalAssetsDepositedOrReserved() - IERC20(eulerWETH).balanceOf(address(alice_collateral_vault));
 
         IERC20(eulerWETH).transfer(address(alice_collateral_vault), collateralToDeposit - 1);
@@ -369,6 +371,14 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         IERC20(eulerWETH).transfer(address(alice_collateral_vault), 1);
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
         vm.stopPrank();
+
+        // Check that Euler sees the correct collateral amount
+        (uint256 collateralValue1,) = IEVault(eulerUSDC).accountLiquidity(address(alice_collateral_vault), false);
+        assertGt(
+            collateralValue1,
+            collateralValue,
+            "Euler collateral amount doesn't consider airdrop"
+        );
     }
 
     // There are 3 cases where a liquidation can be triggered:
@@ -384,7 +394,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
     // 5: liquidator who liquidates and makes the position healthy by repaying all debt ends up with LTV of 0 (no debt at all)
     // 6. liquidator who liquidates worthless collateral doesn't need to repay anything (what is the reasoning for adding code to this case? Maybe for memecoins?)
     // 7. test liquidation case when position is unhealthy on Euler (can test extreme bad debt case, with very low or zero collateral value)
-    // 8. what happens if the Twyne EVK borrow becomes liquidatable before the Euler liquidation is triggered?
+    // 8. what happens if the Twyne reserved assets borrow becomes liquidatable on the intermediate vault before the Twyne liquidation is triggered?
     //   NOTE: the above case cannot happen if intermediate vault liquidation LTV = 1
     // 9. test tokens with other decimals
     // 10. test bad debt socialization (or lack thereof)
@@ -747,7 +757,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.stopPrank();
     }
 
-    // Test 8: what happens if the Twyne EVK borrow becomes liquidatable before the Euler liquidation is triggered?
+    // Test 8: what happens if the Twyne reserved assets borrow becomes liquidatable on the intermediate vault before the Twyne liquidation is triggered?
     // We have disabled EVK vault liquidation (BridgeHookTarget is called on EVK liquidation which reverts).
     function test_e_liquidate_bad_evk_debt() public noGasMetering {
         test_e_setupLiquidation();
@@ -757,6 +767,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         twyneVaultManager.setLTV(eeWETH_intermediate_vault, address(alice_collateral_vault), 0.01e4, 0.05e4, 0);
         vm.stopPrank();
 
+        // Confirm that Twyne collateral vault can be liquidated
         assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be unhealthy but it cannot be liquidated!");
 
         // setLiquidationCoolOffTime(1) is called when intermediate vault is created, so warp forward by 1 block timestamp
@@ -766,6 +777,8 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
         assertGt(liabilityValue, collateralValue, "liability is not less than collateral, EVK liquidation is not possible");
 
+        // Confirm that the intermediate vault's liquidation of the Twyne vault is possible
+        // checkLiquidate() returns (0, 0) if the account is healthy (no liquidation possible)
         (uint256 maxRepay, uint256 maxYield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         assertTrue(maxRepay > 0, "maxRepay is zero!");
         assertTrue(maxYield > 0, "maxYield is zero!");
@@ -777,11 +790,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         IEVC(eeWETH_intermediate_vault.EVC()).enableController(address(this), address(eeWETH_intermediate_vault));
         IEVC(eeWETH_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
 
-        // first: try a direct liquidate call
+        // first: liquidate() call on the intermediate vault reverts due to custom Twyne hook
         vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
         eeWETH_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
 
-        // second: try evc batch call
+        // second: try evc batch call, observe same revert
         IEVC.BatchItem[] memory batchItems = new IEVC.BatchItem[](1);
         batchItems[0] = IEVC.BatchItem({
             targetContract: address(eeWETH_intermediate_vault),

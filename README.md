@@ -12,28 +12,38 @@ The liquidation process for the initial POC involves the liquidator taking over 
 
 ![POC naming](./liquidation_process.png)
 
-## To run a specific test
+## Setup the .env file
 
-If you are setting up your `.env` for the first time: `cp .env.example .env`
+If you are setting up your `.env` for the first time: `cp .env.example .env`. Then set the `FOUNDRY_PROFILE` environment variable as you wish, so that you are testing on the proper chain. The `PROD` variable should be set to `true` when running the deployment script to deploy on-chain.
+
+## Running tests
+
+### To run all tests
 
 ```sh
-FOUNDRY_PROFILE=mainnet forge test --match-test "test_e_second_creditDeposit" -vv
+forge test -vv
 ```
 
-## To run all tests
+### Running a single test
 
 ```sh
-FOUNDRY_PROFILE=base forge test --match-contract "EulerTestEdgeCases|EulerLiquidationTest" -vv
+forge test --match-test "test_e_second_creditDeposit" -vv
+```
+
+### To run tests in certain test files
+
+```sh
+forge test --match-contract "EulerTestEdgeCases|EulerLiquidationTest" -vv
 ```
 
 Note: using llama RPCs like https://eth.llamarpc.com can result in errors due to rate limiting. [Blutgang](https://github.com/rainshowerLabs/blutgang) is recommended to avoid this.
 
-## To check test coverage
+### To check test coverage
 
 If you are setting up your `.env` for the first time: `cp .env.example .env`
 
 ```sh
-FOUNDRY_PROFILE=base forge coverage --match-contract "EulerTestEdgeCases|EulerLiquidationTest" --no-match-coverage "test|EVault|GenericFactory|ProtocolConfig|SequenceRegistry|Synths|script"
+forge coverage --no-match-coverage "test|script"
 ```
 
 And if you want a lcov file to use with a VSCode extension such as [Coverage Gutters](https://marketplace.visualstudio.com/items?itemName=ryanluker.vscode-coverage-gutters), add the `--report lcov` argument to the above.
@@ -43,19 +53,19 @@ And if you want a lcov file to use with a VSCode extension such as [Coverage Gut
 To save a gas-snapshot of tests:
 
 ```sh
-FOUNDRY_PROFILE=base forge snapshot --match-path "test/twyne/*"
+forge snapshot --match-path "test/twyne/*"
 ```
 
 To compare the gas consumption with the saved gas-snapshot:
 
 ```sh
-FOUNDRY_PROFILE=base forge snapshot --match-path "test/twyne/*" --diff
+forge snapshot --match-path "test/twyne/*" --diff
 ```
 
 To view the gas consumption of contract functions:
 
 ```sh
-FOUNDRY_PROFILE=base forge test --match-path "test/twyne/EulerTestNormalActions.t.sol" --gas-report
+forge test --match-path "test/twyne/EulerTestNormalActions.t.sol" --gas-report
 ```
 
 ## Euler vs. Twyne code diff
@@ -81,8 +91,4 @@ Note: If you will reuse an existing EVK deployment instead of spending gas on a 
 3. Copy the output files with deployed addresses at evk-periphery/script/deployments/onchain/8453/output to the tech-notes/ repo in a new directory for this specific deployment to store the addresses in a shared place.
 4. Now back in the playground repo, make sure the .env file has the production private keys with gas to deploy to Base. Also edit script/TwyneDeployEulerIntegration.s.sol so `productionSetup()` contains the addresses of the contracts just deployed by the EVK deploy script. Finally, edit script/TwyneDeployEulerIntegration.s.sol to comment out everything in `run()` except `productionSetup()` and `twyneStuff()`.
 5. Run the Twyne deploy script:
-`forge script script/TwyneDeployEulerIntegration.s.sol:TwyneDeployEulerIntegration --rpc-url https://gateway.tenderly.co/public/base --broadcast -vv`
-
-## Automatic setup
-
-To install dependencies and run the tests, run `forge build` and the dependencies will automatically get installed.
+`forge script script/TwyneDeployEulerIntegration.s.sol:TwyneDeployEulerIntegration --broadcast -vv`

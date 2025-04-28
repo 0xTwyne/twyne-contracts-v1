@@ -6,8 +6,6 @@ import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
 import {SECONDS_PER_YEAR} from "euler-vault-kit/EVault/shared/Constants.sol";
 
 /// @title IRMLinearKink
-/// @custom:security-contact security@euler.xyz
-/// @author Euler Labs (https://www.eulerlabs.com/)
 /// @notice Implementation of a curved interest rate model
 /// @notice interest rate grows linearly with utilization and increases faster after reaching a kink
 contract IRMTwyneCurve is IIRM {
@@ -95,7 +93,7 @@ contract IRMTwyneCurve is IIRM {
             // utilization^10
             util10 = (util10 * utilTemp2) / 1e18;
         }
-        ir = ((linearParameter * utilization) + (polynomialParameter * util10)) * (1e9 / MAXFACTOR); // has 1e18 decimals
+        ir = ((linearParameter * utilization) + (polynomialParameter * util10)) * (1e9 / MAXFACTOR); // has 1e27 decimals
         ir /= SECONDS_PER_YEAR;
 
         return ir;

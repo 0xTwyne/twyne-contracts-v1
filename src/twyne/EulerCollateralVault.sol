@@ -40,9 +40,10 @@ contract EulerCollateralVault is CollateralVaultBase {
     ) external initializer override {
         __CollateralVaultBase_init(__asset, __borrower, __liqLTV, __vaultManager);
 
-        eulerEVC.enableCollateral(address(this), address(__asset));
-        eulerEVC.enableController(address(this), targetVault);
-        SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max);
+        eulerEVC.enableCollateral(address(this), address(__asset)); // necessary for Euler Finance EVK borrowing
+        eulerEVC.enableController(address(this), targetVault); // necessary for Euler Finance EVK borrowing
+        SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max); // necessary for repay()
+        SafeERC20.forceApprove(IERC20(IEVault(address(__asset)).asset()), address(__asset), type(uint).max); // necessary for _depositUnderlying()
         emit T_CollateralVaultInitialized();
     }
 
@@ -176,7 +177,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         uint liquidatorReward;
 
         if (_maxRepay > 0) {
-            liquidatorReward = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+            liquidatorReward = twyneVaultManager.oracleRouter().getQuote(
                 _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(asset()),
                 targetAsset,
                 IEVault(__asset).asset()

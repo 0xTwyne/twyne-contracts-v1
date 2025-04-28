@@ -6,6 +6,9 @@ import {OverCollateralizedTestBase, console2, BridgeHookTarget} from "./OverColl
 import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
+import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
+import {IPriceOracle} from "euler-price-oracle/src/interfaces/IPriceOracle.sol";
+import {Errors as OracleErrors} from "euler-price-oracle/src/lib/Errors.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
@@ -124,10 +127,6 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Change price to meet liquidation criteria
         mockOracle.setPrice(eulerWETH, USD, uint256(WETH_USD_PRICE_INITIAL * 7 / 10));
         mockOracle.setPrice(USDC, WETH, (1e18 * WETH_USD_PRICE_INITIAL * 7) / (USDC_USD_PRICE_INITIAL * 10));
-
-        vm.startPrank(twyneVaultManager.owner());
-        twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (USDC, WETH, address(mockOracle))));
-        vm.stopPrank();
 
         // Verify debt to intermediate vault increased
         (collateralValue, liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
@@ -287,6 +286,23 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             minYieldBalance: 0
         });
         assertTrue(alice_collateral_vault.isExternallyLiquidated());
+
+        vm.expectRevert(); // TODO should be able to use OracleErrors.PriceOracle_NotSupported.selector
+        alice_collateral_vault.balanceOf(address(alice_collateral_vault));
+
+        // Now create the proper CrossOracleAdapter for this scenario
+        address baseAsset = alice_collateral_vault.targetAsset();
+        address crossAsset = IEVault(alice_collateral_vault.asset()).unitOfAccount();
+        address quoteAsset = IEVault(alice_collateral_vault.asset()).asset();
+        address oracleBaseCross = oracleRouter.getConfiguredOracle(baseAsset, crossAsset);
+        address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
+        // Add the crossAdaptor oracle to the EulerRouter
+        vm.startPrank(admin);
+        CrossAdapter crossAdaptorOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
+        twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdaptorOracle))));
+        vm.stopPrank();
+
+        // Now the same balanceOf() call should not revert
         assertGt(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0);
         assertGt(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), 0);
         assertGt(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0);
@@ -322,6 +338,89 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This should pass without explicit liquidation call
         // since we it repays the entire debt to intermediate vault.
         evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(alice_collateral_vault.borrower(), address(0), "borrower NEQ address(0)");
+        assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0, "balanceOf alice NEQ 0");
+        assertEq(alice_collateral_vault.maxRelease(), 0, "maxRelease NEQ 0");
+        // assertGt(IEVault(eulerWETH).balanceOf(newLiquidator), 0, "balanceOf newLiq NEQ 0"); // TODO uncomment this line by fixing the test
+        assertLt(IERC20(USDC).balanceOf(newLiquidator), 10e20, "balanceOf NEQ 10e20");
+    }
+
+
+    function test_e_partialExternalLiquidationCrossAdapter() public noGasMetering {
+        test_e_setupLiquidation();
+        vm.warp(block.timestamp + 1);
+
+        // Confirm external liquidation is possible from eulerUSDC perspective
+        (uint maxrepay, ) = IEVault(eulerUSDC).checkLiquidation(address(this), address(alice_collateral_vault), eulerWETH);
+        assertGt(maxrepay, 0);
+
+        // Confirm no external liquidation before the external liquidation happens
+        assertFalse(alice_collateral_vault.isExternallyLiquidated());
+        assertGt(alice_collateral_vault.maxRepay(), 0);
+
+        // Setup liquidator
+        vm.startPrank(liquidator);
+        IEVC(IEVault(eulerWETH).EVC()).enableCollateral(liquidator, address(eulerWETH));
+        IEVC(IEVault(eulerUSDC).EVC()).enableController(liquidator, address(eulerUSDC));
+
+        // liquidate alice_collateral_vault via eulerUSDC EVault
+        IEVault(eulerUSDC).liquidate({
+            violator: address(alice_collateral_vault),
+            collateral: eulerWETH,
+            repayAssets: maxrepay/2,
+            minYieldBalance: 0
+        });
+        vm.stopPrank();
+
+        // Test for non-zero debt and collateral amount after external liquidation.
+        assertTrue(alice_collateral_vault.isExternallyLiquidated());
+
+        vm.expectRevert(); // TODO should be able to use OracleErrors.PriceOracle_NotSupported.selector
+        alice_collateral_vault.balanceOf(address(alice_collateral_vault));
+
+        // Now create the proper CrossAdapter for this scenario
+        // The CrossAdapter is necessary for the getQuote() call inside splitCollateralAfterExtLiq()
+        address baseAsset = alice_collateral_vault.targetAsset();
+        address crossAsset = IEVault(alice_collateral_vault.asset()).unitOfAccount();
+        address quoteAsset = IEVault(alice_collateral_vault.asset()).asset();
+        address oracleBaseCross = oracleRouter.getConfiguredOracle(baseAsset, crossAsset);
+        address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
+        // Add the crossAdaptor oracle to the EulerRouter
+        vm.startPrank(admin);
+        CrossAdapter crossAdaptorOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
+        twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdaptorOracle))));
+        vm.stopPrank();
+
+        // Now the same balanceOf() call should not revert
+        assertGt(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0);
+        assertGt(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), 0);
+        assertGt(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0);
+
+        // Check that you can't do operations on collateral vault
+        // after external liquidation.
+        vm.startPrank(alice);
+        vm.expectRevert(TwyneErrors.ExternallyLiquidated.selector);
+        alice_collateral_vault.withdraw(1, alice);
+        vm.expectRevert(TwyneErrors.ExternallyLiquidated.selector);
+        alice_collateral_vault.rebalance();
+        vm.stopPrank();
+
+        address newLiquidator = makeAddr("newLiquidator");
+
+        // Deal USDC to newLiquidator
+        deal(address(USDC), newLiquidator, 10e20);
+
+        vm.startPrank(newLiquidator);
+
+        evc.enableController(newLiquidator, address(alice_collateral_vault.intermediateVault()));
+        IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
+        assertEq(IERC20(eulerWETH).balanceOf(newLiquidator), 0);
+
+        // This should pass without explicit liquidation call
+        // since we it repays the entire debt to intermediate vault.
+        alice_collateral_vault.handleExternalLiquidation();
         vm.stopPrank();
 
         assertEq(alice_collateral_vault.borrower(), address(0), "borrower NEQ address(0)");

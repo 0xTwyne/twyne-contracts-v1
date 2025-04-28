@@ -785,6 +785,40 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         assertEq(newInternalHF, internalHF, "Internal health factor should remain unchanged");
     }
 
+    function test_e_teleportRevertsforZeroDeposit() public noGasMetering {
+        test_e_creditDeposit();
+
+        uint C = IERC20(eulerWETH).balanceOf(teleporter);
+        uint B = 5000 * (10**6); // $5000
+
+        // create a debt position on Euler for teleporter
+        vm.startPrank(teleporter);
+        IEVC eulerEVC = IEVC(IEVault(eulerUSDC).EVC());
+        eulerEVC.enableController(teleporter, eulerUSDC);
+        eulerEVC.enableCollateral(teleporter, eulerWETH);
+        IEVault(eulerUSDC).borrow(B, teleporter);
+        vm.stopPrank();
+
+        // teleport position
+        vm.startPrank(teleporter);
+        EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV
+            })
+        );
+        vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
+
+        IEVault(eulerWETH).approve(address(teleporter_collateral_vault), C);
+
+        // Intermediate vault reverts during account status check,
+        // since it doesn't allow borrowing against 0 collateral.
+        vm.expectRevert(Errors.E_AccountLiquidity.selector);
+        teleporter_collateral_vault.teleport(0, type(uint).max, B);
+        vm.stopPrank();
+    }
+
     // TODO Test the scenario where one user is a credit LP and a borrower at the same time
 
     // TODO Test the scenario where a fake intermediate vault is created

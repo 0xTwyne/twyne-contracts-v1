@@ -972,7 +972,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         vm.stopPrank();
     }
 
-    function test_e_teleportEulerPosition() public {
+    function test_e_teleportEulerPosition() public noGasMetering {
         test_e_creditDeposit();
 
         uint C = IERC20(eulerWETH).balanceOf(teleporter);

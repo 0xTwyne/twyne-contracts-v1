@@ -65,7 +65,7 @@ contract VaultManager is Ownable, IErrors, IEvents {
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
     function setAllowedTargetVault(address _intermediateVault, address _targetVault) external onlyOwner {
-        require(IEVault(_intermediateVault).unitOfAccount() == IEVault(_targetVault).unitOfAccount());
+        require(IEVault(_intermediateVault).unitOfAccount() == IEVault(_targetVault).unitOfAccount(), AssetMismatch());
         isAllowedTargetVault[_intermediateVault][_targetVault] = true;
         allowedTargetVaultList[_intermediateVault].push(_targetVault);
         emit T_AddAllowedTargetVault(_intermediateVault, _targetVault);
@@ -130,7 +130,7 @@ contract VaultManager is Ownable, IErrors, IEvents {
     }
 
     /// @notice Set new oracleRouter resolved vault value. Callable by governance or collateral vault factory.
-    /// @param _vault collateral vault address.
+    /// @param _vault EVK or collateral vault address. Must implement `convertToAssets()`.
     /// @param _allow bool value to pass to govSetResolvedVault. True to configure the vault, false to clear the record.
     /// @dev called by createCollateralVault() when a new collateral vault is created so collateral can be price properly.
     /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.

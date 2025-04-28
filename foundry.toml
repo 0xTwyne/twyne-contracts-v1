@@ -60,8 +60,6 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 gas_reports = ["*"]
 # Settings for Ethereum Mainnet
 eth_rpc_url = "https://gateway.tenderly.co/public/mainnet"
-fork_block_number = 20688000 # Block number for mainnet
-
 
 
 [profile.base]
@@ -81,7 +79,6 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 gas_reports = ["*"]
 # Settings for Base network
 eth_rpc_url = "https://gateway.tenderly.co/public/base"
-fork_block_number = 27718000 # Block number for Base
 
 
 [profile.sonic]
@@ -101,4 +98,3 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 gas_reports = ["*"]
 # Settings for Sonic network
 eth_rpc_url = "https://rpc.soniclabs.com"
-fork_block_number = 19185510 # Block number for Sonic

@@ -81,9 +81,8 @@ abstract contract CollateralVaultBase is VaultBase {
         __vaultManager.checkLiqLTV(__liqLTV, targetVault, address(__asset));
         twyneLiqLTV = __liqLTV;
         SafeERC20.forceApprove(IERC20(__asset), _intermediateVault, type(uint).max); // necessary for EVK repay()
-        SafeERC20.forceApprove(IERC20(IEVault(address(__asset)).asset()), address(__asset), type(uint).max); // necessary for _depositUnderlying()
-        evc.enableController(address(this), _intermediateVault); // necessary for EVK borrowing
-        evc.enableCollateral(address(this), address(this)); // necessary for EVK borrowing
+        evc.enableController(address(this), _intermediateVault); // necessary for Twyne EVK borrowing
+        evc.enableCollateral(address(this), address(this)); // necessary for Twyne EVK borrowing
 
         require(address(__asset) == IEVault(_intermediateVault).asset(), AssetMismatch());
     }
@@ -164,6 +163,7 @@ abstract contract CollateralVaultBase is VaultBase {
     {
         createVaultSnapshot();
         _borrow(_targetAmount, _receiver);
+        _handleExcessCredit();
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_Borrow(_targetAmount, _receiver);
     }
@@ -185,6 +185,7 @@ abstract contract CollateralVaultBase is VaultBase {
         }
 
         _repay(_amount);
+        _handleExcessCredit();
         evc.requireVaultStatusCheck();
         emit T_Repay(_amount);
     }

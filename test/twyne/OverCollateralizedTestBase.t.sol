@@ -202,8 +202,11 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
 
         // Choose allowed credit/debt assets for eulerWETH
         twyneVaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
+        // set targetAsset -> USD oracle
+        eulerExternalOracle = EulerRouter(EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(IEVault(eulerUSDC).asset(), USD));
+        twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(eulerUSDC).asset(), USD, address(eulerExternalOracle))));
 
-        // Choose allowed credit/debt assets for eulerWETH
+        // Choose allowed credit/debt assets for eulerWSTETH
         twyneVaultManager.setAllowedTargetVault(address(eeWSTETH_intermediate_vault), eulerUSDC);
 
         vm.stopPrank();

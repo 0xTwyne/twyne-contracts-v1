@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.28;
 
 import "forge-std/Script.sol";
 import "forge-std/Vm.sol";
@@ -23,6 +23,7 @@ import {Base} from "euler-vault-kit/EVault/shared/Base.sol";
 import {ProtocolConfig} from "euler-vault-kit/ProtocolConfig/ProtocolConfig.sol";
 import {USD} from "euler-price-oracle/test/utils/EthereumAddresses.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
+import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_SKIM, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
@@ -93,15 +94,17 @@ contract TwyneDeployEulerIntegration is Script {
     }
 
     function run() public {
-        string memory foundryProfile = vm.envString("FOUNDRY_PROFILE");
-        if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("baseProd"))) ||
-        keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("base")))) {
+        if (block.chainid == 1) { // mainnet
+            eulerOnchainRouter = 0x83B3b76873D36A28440cF53371dF404c42497136;
+            eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
+            eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
+            eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
+        } else if (block.chainid == 8453) { // base
             eulerOnchainRouter = 0x6E183458600e66047A0f4D356d9DAa480DA1CA59;
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
             eulerWSTETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
-        } else if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("sonicProd"))) ||
-        keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("sonic")))) {
+        } else if (block.chainid == 146) { // sonic
             eulerOnchainRouter = 0x231811a9574dDE19e49f72F7c1cAC3085De6971a;
             eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
             eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
@@ -126,18 +129,14 @@ contract TwyneDeployEulerIntegration is Script {
         deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         deployer = vm.envAddress("DEPLOYER_ADDRESS");
 
-        if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("baseProd"))) ||
-        keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("sonicProd")))) {
-            productionSetup(); // comment this out for testing
+        // if (vm.envBool("PROD")) { // Run script against on-chain RPC
+            productionSetup(); // sets up on-chain EVK deployment addresses from evk-periphery script
             twyneStuff();
-        } else if (keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("base"))) ||
-        keccak256(abi.encodePacked((foundryProfile))) == keccak256(abi.encodePacked(("sonic")))) {
-            evkStuff(); // comment this out for production
-            twyneStuff();
-            setAdminOwnership(); // comment this out for production
-        } else {
-
-        }
+            // setAdminOwnership(); // sets new multisig admin owner for addresses
+        // } else if (!vm.envBool("PROD")) { // run without on-chain dependency
+            // evkStuff(); // deploys fresh EVK contracts, simulating the evk-periphery script
+            // twyneStuff();
+        // }
     }
 
     function toAsciiString(address x) internal pure returns (string memory) {
@@ -246,13 +245,22 @@ contract TwyneDeployEulerIntegration is Script {
     }
 
     function productionSetup() public {
-        address oracleRouterFactory = 0xF28c7B9cfae33De0dADdD168F1c3a0Ecd047c423;
-        evc = EthereumVaultConnector(payable(0x05CD7a2eB03C361F0Fe18374dC381E5918Ff9D74));
+        address oracleRouterFactory;
+        if (block.chainid == 8453) {
+            oracleRouterFactory = 0x45A2A6b0f126840821748A4d21b5cEdAFA84e701;
+            evc = EthereumVaultConnector(payable(0x00F3BE2c13FB10129E91dff8EF667e503C7a961E));
+            factory = GenericFactory(0x599E16AD5C43e95760c9174E685d57D27A57BEd4);
+            protocolConfig = ProtocolConfig(0x359E4c72Cc58896743e42927594b15a359962257);
+        } else {
+            console2.log("Only supports Base right now");
+            revert UnknownProfile();
+        }
 
         vm.startBroadcast(deployerKey);
+        protocolConfig.setInterestFeeRange(0, 0); // set fee range to zero
+        protocolConfig.setProtocolFeeShare(0); // set protocol fee to zero
         oracleRouter = EulerRouter(EulerRouterFactory(oracleRouterFactory).deploy(deployer));
         vm.stopBroadcast();
-        factory = GenericFactory(0xa76C7B314c310ABb3Fb7c68778C0C3369cAf24Fc);
     }
 
     function twyneStuff() public {
@@ -282,6 +290,15 @@ contract TwyneDeployEulerIntegration is Script {
 
         vaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
+
+        // Set CrossAdaptor for handling the external liquidation case
+        address baseAsset = eulerUSDC;
+        address crossAsset = IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount();
+        address quoteAsset = IEVault(eeWETH_intermediate_vault.asset()).asset();
+        address oracleBaseCross = oracleRouter.getConfiguredOracle(baseAsset, crossAsset);
+        address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
+        CrossAdapter crossAdaptorOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
+        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdaptorOracle))));
 
         // Next: Deploy collateral vault
         deployer_collateral_vault = EulerCollateralVault(

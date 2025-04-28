@@ -5,6 +5,7 @@ pragma solidity ^0.8.28;
 interface IErrors {
     error AssetMismatch(); // 0x83c1010a
     error CallerNotOwnerOrCollateralVaultFactory(); // 0xda57fd09
+    error CannotRebalance(); // 0x302a624a
     error ExternallyLiquidated(); // 0x111c379d
     error HealthyNotLiquidatable(); // 0x8e9797c5
     error IncorrectIndex(); // 0x07cc4d8f

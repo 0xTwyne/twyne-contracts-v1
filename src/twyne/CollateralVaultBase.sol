@@ -377,7 +377,8 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev The calculation varies depending on the external protocol integration
     /// @return uint The amount of excess credit that can be released, denominated in the collateral asset
     function canRebalance() external view nonReentrantRO returns (uint) {
-        return totalAssetsDepositedOrReserved - _invariantCollateralAmount();
+        require(totalAssetsDepositedOrReserved > _invariantCollateralAmount(), CannotRebalance());
+        unchecked { return totalAssetsDepositedOrReserved - _invariantCollateralAmount(); }
     }
 
     function _handleExcessCredit() internal virtual;
@@ -388,6 +389,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev Excess credit exists when: liqLTV_twyne * C < safety_buffer * liqLTV_external * (C + C_LP)
     /// @dev Anyone can call this function to rebalance a position
     function rebalance() external callThroughEVC nonReentrant {
+        require(totalAssetsDepositedOrReserved > _invariantCollateralAmount(), CannotRebalance());
         require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
         _handleExcessCredit();
         emit T_Rebalance();

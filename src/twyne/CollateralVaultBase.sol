@@ -297,7 +297,12 @@ abstract contract CollateralVaultBase is VaultBase {
     ) public onlyBorrowerAndNotExtLiquidated nonReentrant returns (uint underlying) {
         createVaultSnapshot();
 
-        totalAssetsDepositedOrReserved -= assets;
+        uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
+        if (assets == type(uint).max) {
+            assets = _totalAssetsDepositedOrReserved - maxRelease();
+        }
+
+        totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
         underlying = IEVault(asset()).redeem(assets, receiver, address(this));
         _handleExcessCredit();
 

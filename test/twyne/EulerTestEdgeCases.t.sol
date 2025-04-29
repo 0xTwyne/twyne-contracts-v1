@@ -815,7 +815,7 @@ contract EulerTestEdgeCases is EulerTestNormalActions {
         // Intermediate vault reverts during account status check,
         // since it doesn't allow borrowing against 0 collateral.
         vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        teleporter_collateral_vault.teleport(0, type(uint).max, B);
+        teleporter_collateral_vault.teleport(0, B);
         vm.stopPrank();
     }
 

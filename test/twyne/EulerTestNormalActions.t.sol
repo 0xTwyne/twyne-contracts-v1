@@ -582,6 +582,7 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
         // alice can use redeemUnderlying though
         vm.startPrank(alice);
 
+        uint256 snapshot = vm.snapshotState();
         uint maxRedeem = IERC20(alice_collateral_vault.asset()).balanceOf(address(alice_collateral_vault)) - alice_collateral_vault.maxRelease();
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
@@ -594,6 +595,22 @@ contract EulerTestNormalActions is OverCollateralizedTestBase {
 
         evc.batch(items);
 
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), 0);
+        assertEq(alice_collateral_vault.maxRelease(), 0);
+
+        vm.revertToState(snapshot);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.redeemUnderlying, (type(uint).max, alice))
+        });
+
+        evc.batch(items);
+
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), 0);
+        assertEq(alice_collateral_vault.maxRelease(), 0);
         vm.stopPrank();
     }
 

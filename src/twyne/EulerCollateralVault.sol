@@ -47,14 +47,6 @@ contract EulerCollateralVault is CollateralVaultBase {
         emit T_CollateralVaultInitialized();
     }
 
-    /// @notice Disables the controller.
-    /// @dev The controller is only disabled if the account has no debt.
-    /// @dev required by IVault inheritance of VaultBase
-    function disableController() external override callThroughEVC nonReentrant {
-        evc.disableController(_msgSender());
-        emit T_ControllerDisabled();
-    }
-
     /// @dev increment the version for proxy upgrades
     function version() external override pure returns (uint) {
         return 0;
@@ -155,7 +147,7 @@ contract EulerCollateralVault is CollateralVaultBase {
     /// @dev returns 0 on external liquidation, because:
     /// handleExternalLiquidation() sets this vault's collateral balance to 0, balanceOf is then
     /// called by the intermediate vault when someone settles the remaining bad debt.
-    function balanceOf(address user) external view nonReentrantRO override returns (uint) {
+    function balanceOf(address user) external view nonReentrantView override returns (uint) {
         if (user != address(this)) return 0;
         if (borrower == address(0)) return 0;
 

@@ -72,18 +72,16 @@ contract EulerCollateralVault is CollateralVaultBase {
     }
 
     /// @notice adjust credit reserved from intermediate vault
-    function _handleExcessCredit() internal override {
-        uint invariantCollateralAmount = _invariantCollateralAmount();
-
+    function _handleExcessCredit(uint __invariantCollateralAmount) internal override {
         uint vaultAssets = totalAssetsDepositedOrReserved;
-        if (vaultAssets > invariantCollateralAmount) {
-            totalAssetsDepositedOrReserved = vaultAssets - intermediateVault.repay(vaultAssets - invariantCollateralAmount, address(this));
+        if (vaultAssets > __invariantCollateralAmount) {
+            totalAssetsDepositedOrReserved = vaultAssets - intermediateVault.repay(vaultAssets - __invariantCollateralAmount, address(this));
         } else {
-            totalAssetsDepositedOrReserved = vaultAssets + intermediateVault.borrow(invariantCollateralAmount - vaultAssets, address(this));
+            totalAssetsDepositedOrReserved = vaultAssets + intermediateVault.borrow(__invariantCollateralAmount - vaultAssets, address(this));
         }
     }
 
-    /// @notice Calculates the collateral assets that should be help by the collateral vault to comply with invariants
+    /// @notice Calculates the collateral assets that should be held by the collateral vault to comply with invariants
     /// @return uint Returns the amount of collateral assets that the collateral vault should hold with zero excess credit
     function _invariantCollateralAmount() internal view override returns (uint) {
         uint userCollateral = totalAssetsDepositedOrReserved - maxRelease();
@@ -246,7 +244,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         createVaultSnapshot();
 
         totalAssetsDepositedOrReserved += toDeposit;
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
         items[0] = IEVC.BatchItem({

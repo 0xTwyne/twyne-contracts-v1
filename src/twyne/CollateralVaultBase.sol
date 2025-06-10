@@ -168,7 +168,7 @@ abstract contract CollateralVaultBase is VaultBase {
     {
         createVaultSnapshot();
         _borrow(_targetAmount, _receiver);
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_Borrow(_targetAmount, _receiver);
     }
@@ -189,7 +189,7 @@ abstract contract CollateralVaultBase is VaultBase {
         }
 
         _repay(_amount);
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
         evc.requireVaultStatusCheck();
         emit T_Repay(_amount);
     }
@@ -246,7 +246,7 @@ abstract contract CollateralVaultBase is VaultBase {
 
         SafeERC20Lib.safeTransferFrom(IERC20_Euler(asset()), borrower, address(this), assets, permit2);
         totalAssetsDepositedOrReserved += assets;
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_Deposit(assets);
     }
@@ -261,7 +261,7 @@ abstract contract CollateralVaultBase is VaultBase {
     {
         createVaultSnapshot();
         totalAssetsDepositedOrReserved += _depositUnderlying(underlying);
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_DepositUnderlying(underlying);
     }
@@ -285,7 +285,7 @@ abstract contract CollateralVaultBase is VaultBase {
 
         totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
         SafeERC20.safeTransfer(IERC20(asset()), receiver, assets);
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_Withdraw(assets, receiver);
     }
@@ -307,7 +307,7 @@ abstract contract CollateralVaultBase is VaultBase {
 
         totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
         underlying = IEVault(asset()).redeem(assets, receiver, address(this));
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
 
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_RedeemUnderlying(assets, receiver);
@@ -322,7 +322,7 @@ abstract contract CollateralVaultBase is VaultBase {
         createVaultSnapshot();
         twyneVaultManager.checkLiqLTV(_ltv, targetVault, _asset);
         twyneLiqLTV = _ltv;
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_SetTwyneLiqLTV(_ltv);
     }
@@ -385,11 +385,12 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev The calculation varies depending on the external protocol integration
     /// @return uint The amount of excess credit that can be released, denominated in the collateral asset
     function canRebalance() external view nonReentrantRO returns (uint) {
-        require(totalAssetsDepositedOrReserved > _invariantCollateralAmount(), CannotRebalance());
-        unchecked { return totalAssetsDepositedOrReserved - _invariantCollateralAmount(); }
+        uint __invariantCollateralAmount = _invariantCollateralAmount();
+        require(totalAssetsDepositedOrReserved > __invariantCollateralAmount, CannotRebalance());
+        unchecked { return totalAssetsDepositedOrReserved - __invariantCollateralAmount; }
     }
 
-    function _handleExcessCredit() internal virtual;
+    function _handleExcessCredit(uint __invariantCollateralAmount) internal virtual;
 
     function _invariantCollateralAmount() internal view virtual returns (uint);
 
@@ -397,9 +398,10 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev Excess credit exists when: liqLTV_twyne * C < safety_buffer * liqLTV_external * (C + C_LP)
     /// @dev Anyone can call this function to rebalance a position
     function rebalance() external callThroughEVC nonReentrant {
-        require(totalAssetsDepositedOrReserved > _invariantCollateralAmount(), CannotRebalance());
+        uint __invariantCollateralAmount = _invariantCollateralAmount();
+        require(totalAssetsDepositedOrReserved > __invariantCollateralAmount, CannotRebalance());
         require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
-        _handleExcessCredit();
+        _handleExcessCredit(__invariantCollateralAmount);
         emit T_Rebalance();
     }
 

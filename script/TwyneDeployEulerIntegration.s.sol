@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
 import "forge-std/Script.sol";
 import "forge-std/Vm.sol";
 import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConnector.sol";
 import {MockBalanceTracker} from "euler-vault-kit/../test/mocks/MockBalanceTracker.sol";
-import {IRMLinearKink} from "euler-vault-kit/InterestRateModels/IRMLinearKink.sol";
+import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 import {SequenceRegistry} from "euler-vault-kit/SequenceRegistry/SequenceRegistry.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
@@ -36,6 +36,8 @@ interface EulerRouterFactory {
     function deploy(address) external returns (address);
 }
 
+/// @title TwyneDeployEulerIntegration
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 contract TwyneDeployEulerIntegration is Script {
     // set asset addresses
 
@@ -79,7 +81,7 @@ contract TwyneDeployEulerIntegration is Script {
     uint256 deployerKey;
 
 
-    uint constant twyneLiqLTV = 0.98e4;
+    uint constant twyneLiqLTV = 0.90e4;
 
     error UnknownProfile();
 
@@ -179,12 +181,17 @@ contract TwyneDeployEulerIntegration is Script {
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_SKIM);
         // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
-        new_vault.setInterestRateModel(address(new IRMLinearKink(0, 1681485479, 22360681293, 3435973836)));
+        new_vault.setInterestRateModel(address(new IRMTwyneCurve({
+            idealKinkInterestRate_: 600, // 6%
+            linearKinkUtilizationRate_: 8000, // 80%
+            maxInterestRate_: 50000, // 500%
+            nonlinearPoint_: 5e17 // 50%
+        })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
         new_vault.setFeeReceiver(feeReceiver);
         new_vault.setInterestFee(0); // set zero governance fee
-        new_vault.setCaps(32018, 32018); // 5 WETH supply and borrow cap
+        new_vault.setCaps(24339, 24339); // 38 WETH supply and borrow cap
 
         vaultManager.setOracleResolvedVault(address(new_vault), true);
         vaultManager.setOracleResolvedVault(_asset, true); // need to set this for recursive resolveOracle() lookup
@@ -251,8 +258,13 @@ contract TwyneDeployEulerIntegration is Script {
             evc = EthereumVaultConnector(payable(0x00F3BE2c13FB10129E91dff8EF667e503C7a961E));
             factory = GenericFactory(0x599E16AD5C43e95760c9174E685d57D27A57BEd4);
             protocolConfig = ProtocolConfig(0x359E4c72Cc58896743e42927594b15a359962257);
+        } else if (block.chainid == 1) {
+            oracleRouterFactory = 0x45A2A6b0f126840821748A4d21b5cEdAFA84e701;
+            evc = EthereumVaultConnector(payable(0x0C9a3dd6b8F28529d72d7f9cE918D493519EE383));
+            factory = GenericFactory(0x29a56a1b8214D9Cf7c5561811750D5cBDb45CC8e);
+            protocolConfig = ProtocolConfig(0x4cD6BF1D183264c02Be7748Cb5cd3A47d013351b);
         } else {
-            console2.log("Only supports Base right now");
+            console2.log("Only supports Base and mainnet right now");
             revert UnknownProfile();
         }
 
@@ -283,12 +295,12 @@ contract TwyneDeployEulerIntegration is Script {
         collateralVaultFactory.setVaultManager(address(vaultManager));
 
         vaultManager.setOracleRouter(address(oracleRouter));
-        vaultManager.setMaxLiquidationLTV(eulerWETH, 0.98e4);
+        vaultManager.setMaxLiquidationLTV(eulerWETH, 0.93e4);
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newIntermediateVault(eulerWETH, address(oracleRouter), USD);
 
-        vaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
+        vaultManager.setExternalLiqBuffer(eulerWETH, 1e4);
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
         // Set CrossAdapter for handling the external liquidation case
@@ -340,6 +352,8 @@ contract TwyneDeployEulerIntegration is Script {
         collateralVaultFactory.transferOwnership(admin);
         vaultManager.doCall(address(oracleRouter), 0, abi.encodeCall(oracleRouter.transferGovernance, admin));
         vaultManager.transferOwnership(admin);
+        address beaconAddr = collateralVaultFactory.collateralVaultBeacon(eulerUSDC);
+        UpgradeableBeacon(beaconAddr).transferOwnership(admin);
         require(factory.upgradeAdmin() == admin, "factory needs to be set to correct admin");
         require(collateralVaultFactory.owner() == admin, "collateralVaultFactory needs to be set to correct admin");
         require(oracleRouter.governor() == admin, "factory needs to be set to correct admin");

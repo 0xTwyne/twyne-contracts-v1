@@ -228,6 +228,13 @@ abstract contract CollateralVaultBase is VaultBase {
         // sanity check in case the snapshot hasn't been taken
         require(oldSnapshot != 0, SnapshotNotTaken());
         require(!_canLiquidate(), VaultStatusLiquidatable());
+
+        // If the vault has been externally liquidated, any bad debt from intermediate vault
+        // has to be settled via intermediateVault.liquidate().
+        // Bad debt settlement reduces this debt to 0.
+        if (borrower == address(0)) {
+            require(intermediateVault.debtOf(address(this)) == 0, BadDebtNotSettled());
+        }
     }
 
     ///

@@ -45,6 +45,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
 
     modifier onlyBorrowerAndNotExtLiquidated() {
         _callThroughEVC();
+        _onlyEVCAccountOwner();
         require(_msgSender() == borrower, ReceiverNotBorrower());
         require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
         _;

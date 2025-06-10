@@ -2,16 +2,19 @@
 
 pragma solidity ^0.8.28;
 
+import {IErrors} from "src/interfaces/IErrors.sol";
+import {IEvents} from "src/interfaces/IEvents.sol";
 import {PausableUpgradeable} from "openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import {Address} from "openzeppelin-contracts/utils/Address.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
-import {VaultBase} from "src/twyne/VaultBase.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
 import {SafeERC20Lib, IERC20 as IERC20_Euler} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
+import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 /// @title CollateralVaultBase
 /// @notice Provides general vault functionality applicable to any external integration.
@@ -19,12 +22,13 @@ import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 /// @dev It only supports name, symbol, balanceOf(address) and reverts for all other ERC20 fns.
 /// @notice In this contract, the EVC is authenticated before any action that may affect the state of the vault or an account.
 /// @notice This is done to ensure that if its EVC calling, the account is correctly authorized.
-abstract contract CollateralVaultBase is VaultBase {
+abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IErrors, IEvents  {
     uint internal constant MAXFACTOR = 1e4;
     address internal constant permit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     address public immutable targetVault;
 
+    uint private snapshot;
     uint public totalAssetsDepositedOrReserved;
 
     address public borrower;
@@ -51,9 +55,17 @@ abstract contract CollateralVaultBase is VaultBase {
         _;
     }
 
+    /// @notice Reentrancy guard for view functions
+    modifier nonReentrantView() virtual {
+        if (_reentrancyGuardEntered()) {
+            revert ReentrancyGuardReentrantCall();
+        }
+        _;
+    }
+
     /// @param _evc address of EVC deployed by Twyne
     /// @param _targetVault address of the target vault to borrow from
-    constructor(address _evc, address _targetVault) VaultBase(_evc) {
+    constructor(address _evc, address _targetVault) EVCUtil(_evc) {
         targetVault = _targetVault;
     }
 
@@ -67,7 +79,7 @@ abstract contract CollateralVaultBase is VaultBase {
         uint __liqLTV,
         VaultManager __vaultManager
     ) internal onlyInitializing {
-        __VaultBase_init();
+        __ReentrancyGuard_init();
 
         _asset = address(__asset);
         borrower = __borrower;
@@ -214,19 +226,23 @@ abstract contract CollateralVaultBase is VaultBase {
     // https://github.com/euler-xyz/evc-playground/blob/master/src/vaults/open-zeppelin/VaultSimple.sol
     ///
 
-    /// @notice Creates a snapshot of the vault.
+    /// @notice Creates a snapshot of the vault state
     /// @dev This function is called before any action that may affect the vault's state.
-    /// @return A snapshot of the vault's state.
-    function doCreateVaultSnapshot() internal pure override returns (uint) {
-        return 1;
+    function createVaultSnapshot() internal {
+        // We delete snapshots on `checkVaultStatus`, which can only happen at the end of the EVC batch. Snapshots are
+        // taken before any action is taken on the vault that affects the vault asset records and deleted at the end, so
+        // that asset calculations are always based on the state before the current batch of actions.
+        if (snapshot == 0) {
+            snapshot = 1;
+        }
     }
 
-    /// @notice Checks the vault's status.
+    /// @notice Checks the vault status
     /// @dev This function is called after any action that may affect the vault's state.
-    /// @param oldSnapshot The snapshot of the vault's state before the action.
-    function doCheckVaultStatus(uint oldSnapshot) internal view override {
+    /// @dev Executed as a result of requiring vault status check on the EVC.
+    function checkVaultStatus() external onlyEVCWithChecksInProgress returns (bytes4) {
         // sanity check in case the snapshot hasn't been taken
-        require(oldSnapshot != 0, SnapshotNotTaken());
+        require(snapshot != 0, SnapshotNotTaken());
         require(!_canLiquidate(), VaultStatusLiquidatable());
 
         // If the vault has been externally liquidated, any bad debt from intermediate vault
@@ -235,6 +251,20 @@ abstract contract CollateralVaultBase is VaultBase {
         if (borrower == address(0)) {
             require(intermediateVault.debtOf(address(this)) == 0, BadDebtNotSettled());
         }
+        delete snapshot;
+
+        return this.checkVaultStatus.selector;
+    }
+
+    /// @dev checkVaultStatus() is responsible to ensure this vault is in correct state.
+    /// Since this vault is used by a single borrower, checkVaultStatus() is enough to ensure the account is in correct state.
+    /// So we just return the selector here.
+    function checkAccountStatus(
+        address /*account*/,
+        address[] calldata /*collaterals*/
+    ) external view onlyEVCWithChecksInProgress returns (bytes4) {
+
+        return this.checkAccountStatus.selector;
     }
 
     ///
@@ -337,7 +367,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @notice check if a vault can be liquidated
     /// @dev calling canLiquidate() in other functions directly causes a read-only reentrancy issue,
     /// so move the logic to an internal function.
-    function canLiquidate() external view nonReentrantRO returns (bool) {
+    function canLiquidate() external view nonReentrantView returns (bool) {
         return _canLiquidate();
     }
 
@@ -370,7 +400,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev Detects liquidation by comparing the tracked totalAssetsDepositedOrReserved with the actual
     /// token balance - if actual balance is less, external liquidation has occurred
     /// @return bool True if the vault has been externally liquidated, false otherwise
-    function isExternallyLiquidated() external view nonReentrantRO returns (bool) {
+    function isExternallyLiquidated() external view nonReentrantView returns (bool) {
         return totalAssetsDepositedOrReserved > IERC20(asset()).balanceOf(address(this));
     }
 
@@ -391,7 +421,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev Excess credit exists when the relationship between borrower collateral and reserved credit becomes unbalanced
     /// @dev The calculation varies depending on the external protocol integration
     /// @return uint The amount of excess credit that can be released, denominated in the collateral asset
-    function canRebalance() external view nonReentrantRO returns (uint) {
+    function canRebalance() external view nonReentrantView returns (uint) {
         uint __invariantCollateralAmount = _invariantCollateralAmount();
         require(totalAssetsDepositedOrReserved > __invariantCollateralAmount, CannotRebalance());
         unchecked { return totalAssetsDepositedOrReserved - __invariantCollateralAmount; }

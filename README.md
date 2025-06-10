@@ -38,6 +38,13 @@ forge test --match-contract "EulerTestEdgeCases|EulerLiquidationTest" -vv
 
 Note: using llama RPCs like https://eth.llamarpc.com can result in errors due to rate limiting. [Blutgang](https://github.com/rainshowerLabs/blutgang) is recommended to avoid this.
 
+### To run differential tests
+Assuming you have cloned `py-fuzz` repo in the same directory as this repo, and you have installed all dependencies in `py-fuzz`:
+```sh
+source ../py-fuzz/venv/bin/activate
+forge test --match-contract "testFuzz_e_IRMTwyneCurve" -vv
+```
+
 ### To check test coverage
 
 If you are setting up your `.env` for the first time: `cp .env.example .env`

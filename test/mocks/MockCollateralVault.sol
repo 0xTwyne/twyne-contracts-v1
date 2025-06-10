@@ -49,13 +49,6 @@ contract MockCollateralVault is CollateralVaultBase {
         SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max);
     }
 
-    /// @notice Disables the controller.
-    /// @dev The controller is only disabled if the account has no debt.
-    /// @dev required by IVault inheritance of VaultBase
-    function disableController() external override callThroughEVC { // diff
-        revert("not implemented"); // diff, to test proxy upgrade
-    }
-
     /// @dev increment the version for proxy upgrades
     function version() external override pure returns (uint) {
         return 909; // diff
@@ -78,18 +71,16 @@ contract MockCollateralVault is CollateralVaultBase {
     }
 
     /// @notice adjust credit reserved from intermediate vault
-    function _handleExcessCredit() internal override {
-        uint invariantCollateralAmount = _invariantCollateralAmount();
-
+    function _handleExcessCredit(uint __invariantCollateralAmount) internal override {
         uint vaultAssets = totalAssetsDepositedOrReserved;
-        if (vaultAssets > invariantCollateralAmount) {
-            totalAssetsDepositedOrReserved = vaultAssets - intermediateVault.repay(vaultAssets - invariantCollateralAmount, address(this));
+        if (vaultAssets > __invariantCollateralAmount) {
+            totalAssetsDepositedOrReserved = vaultAssets - intermediateVault.repay(vaultAssets - __invariantCollateralAmount, address(this));
         } else {
-            totalAssetsDepositedOrReserved = vaultAssets + intermediateVault.borrow(invariantCollateralAmount - vaultAssets, address(this));
+            totalAssetsDepositedOrReserved = vaultAssets + intermediateVault.borrow(__invariantCollateralAmount - vaultAssets, address(this));
         }
     }
 
-    /// @notice Calculates the collateral assets that should be help by the collateral vault to comply with invariants
+    /// @notice Calculates the collateral assets that should be held by the collateral vault to comply with invariants
     /// @return uint Returns the amount of collateral assets that the collateral vault should hold with zero excess credit
     function _invariantCollateralAmount() internal view override returns (uint) {
         uint userCollateral = totalAssetsDepositedOrReserved - maxRelease();
@@ -160,21 +151,18 @@ contract MockCollateralVault is CollateralVaultBase {
     }
 
     /// @notice custom balanceOf implementation
-    function balanceOf(address user) external view nonReentrantRO override returns (uint) {
+    /// @dev returns 0 on external liquidation, because:
+    /// handleExternalLiquidation() sets this vault's collateral balance to 0, balanceOf is then
+    /// called by the intermediate vault when someone settles the remaining bad debt.
+    function balanceOf(address user) external view nonReentrantView override returns (uint) {
         if (user != address(this) && user != borrower) return 0; // diff
         if (borrower == address(0)) return 0;
 
         uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
-        uint amount = IERC20(asset()).balanceOf(address(this));
-        uint _maxRelease = maxRelease();
+        // return 0 if externally liquidated
+        if (_totalAssetsDepositedOrReserved > IERC20(asset()).balanceOf(address(this))) return 0;
 
-        // If this vault has been externally liquidated
-        if (_totalAssetsDepositedOrReserved > amount) {
-            (,uint releaseAmount,) = splitCollateralAfterExtLiq(amount, maxRepay(), _maxRelease);
-            return releaseAmount;
-        }
-
-        return _totalAssetsDepositedOrReserved - _maxRelease;
+        return _totalAssetsDepositedOrReserved - maxRelease();
     }
 
     /// @notice splits remaining collateral between liquidator, intermediate vault and borrow
@@ -205,10 +193,22 @@ contract MockCollateralVault is CollateralVaultBase {
         uint amount = IERC20(__asset).balanceOf(address(this));
         require(totalAssetsDepositedOrReserved > amount, NotExternallyLiquidated());
 
+        {
+            (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
+            // Equality is needed for the complete liquidation case (entire debt and collateral is taken by Euler liquidator)
+            require(externalCollateralValueScaledByLiqLTV >= externalBorrowDebtValue, ExternalPositionUnhealthy());
+        }
+
+        uint _maxRelease = maxRelease();
         address liquidator = _msgSender();
+
+        if (_maxRelease == 0) {
+            require(liquidator == borrower, NoLiquidationForZeroReserve());
+        }
+
         uint _maxRepay = maxRepay();
 
-        (uint liquidatorReward, uint releaseAmount, uint borrowerClaim) = splitCollateralAfterExtLiq(amount, _maxRepay, maxRelease());
+        (uint liquidatorReward, uint releaseAmount, uint borrowerClaim) = splitCollateralAfterExtLiq(amount, _maxRepay, _maxRelease);
 
         if (_maxRepay > 0) {
             // step 1: repay all external debt
@@ -235,6 +235,7 @@ contract MockCollateralVault is CollateralVaultBase {
         delete borrower;
 
         evc.requireVaultStatusCheck();
+        emit T_HandleExternalLiquidation();
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault
@@ -242,7 +243,7 @@ contract MockCollateralVault is CollateralVaultBase {
         createVaultSnapshot();
 
         totalAssetsDepositedOrReserved += toDeposit;
-        _handleExcessCredit();
+        _handleExcessCredit(_invariantCollateralAmount());
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
         items[0] = IEVC.BatchItem({

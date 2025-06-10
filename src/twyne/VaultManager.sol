@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BUSL-1.1
 
 pragma solidity ^0.8.28;
 
@@ -11,6 +11,8 @@ import {RevertBytes} from "euler-vault-kit/EVault/shared/lib/RevertBytes.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
+/// @title IRMLinearKink
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @notice Manages twyne parameters that affect it globally: assets allowed, LTVs, interest rates.
 /// To be owned by Twyne multisig.
 contract VaultManager is Ownable, IErrors, IEvents {

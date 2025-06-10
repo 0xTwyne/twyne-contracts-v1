@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BUSL-1.1
 
 pragma solidity ^0.8.28;
 
@@ -11,6 +11,7 @@ import {SafeERC20Lib, IERC20 as IERC20_Euler} from "euler-vault-kit/EVault/share
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 /// @title EulerCollateralVault
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @dev Provides integration logic for Euler Finance as external protocol.
 /// @notice In this contract, the EVC is authenticated before any action that may affect the state of the vault or an
 /// account. This is done to ensure that if it's EVC calling, the account is correctly authorized.

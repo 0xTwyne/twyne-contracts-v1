@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BUSL-1.1
 
 pragma solidity ^0.8.28;
 
@@ -13,6 +13,8 @@ import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
 import {IEvents} from "src/interfaces/IEvents.sol";
 
+/// @title CollateralVaultFactory
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors, IEvents {
     mapping(address targetVault => address beacon) public collateralVaultBeacon;
     mapping(address => bool) public isCollateralVault;

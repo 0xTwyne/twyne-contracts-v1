@@ -7,6 +7,7 @@ interface IErrors {
     error CallerNotOwnerOrCollateralVaultFactory(); // 0xda57fd09
     error CannotRebalance(); // 0x302a624a
     error ExternallyLiquidated(); // 0x111c379d
+    error ExternalPositionUnhealthy(); // 0xf1cd786c
     error HealthyNotLiquidatable(); // 0x8e9797c5
     error IncorrectIndex(); // 0x07cc4d8f
     error IntermediateVaultAlreadySet(); // 0x00e658da

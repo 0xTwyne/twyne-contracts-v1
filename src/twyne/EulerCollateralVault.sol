@@ -199,6 +199,11 @@ contract EulerCollateralVault is CollateralVaultBase {
         uint amount = IERC20(__asset).balanceOf(address(this));
         require(totalAssetsDepositedOrReserved > amount, NotExternallyLiquidated());
 
+        {
+            (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
+            require(externalCollateralValueScaledByLiqLTV > externalBorrowDebtValue, ExternalPositionUnhealthy());
+        }
+
         address liquidator = _msgSender();
         uint _maxRepay = maxRepay();
 

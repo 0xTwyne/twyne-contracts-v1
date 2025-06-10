@@ -155,6 +155,11 @@ abstract contract CollateralVaultBase is VaultBase {
     /// Revert otherwise.
     function _repay(uint _targetAmount) internal virtual;
 
+    /// @notice Borrows target assets from the external lending protocol
+    /// @dev This function calls the internal _borrow function to handle the protocol-specific borrow logic,
+    /// then transfers the target asset from the vault to _receiver.
+    /// @param _targetAmount The amount of target asset to borrow
+    /// @param _receiver The receiver of the borrowed assets
     function borrow(uint _targetAmount, address _receiver)
         external
         onlyBorrowerAndNotExtLiquidated
@@ -173,8 +178,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @dev This function transfers the target asset from the caller to the vault, then
     /// calls the internal _repay function to handle the protocol-specific repayment logic
     /// @dev Reverts if attempting to repay more than the current debt
-    /// @dev Can be called by anyone, not just the borrower
-    /// @param _amount The amount of debt to repay, or type(uint).max for full repayment
+    /// @param _amount The amount of target asset to repay, or type(uint).max for full repayment
     function repay(uint _amount) external onlyBorrowerAndNotExtLiquidated nonReentrant {
         createVaultSnapshot();
         uint _maxRepay = maxRepay();
@@ -266,9 +270,8 @@ abstract contract CollateralVaultBase is VaultBase {
     function _depositUnderlying(uint underlying) internal virtual returns (uint assets);
 
     /// @notice Withdraws a certain amount of assets for a receiver.
-    /// @param assets The assets to withdraw.
+    /// @param assets Amount of collateral assets to withdraw.
     /// @param receiver The receiver of the withdrawal.
-    /// @dev owner address param is unnecessary, kept to match IERC4626 interface.
     function withdraw(
         uint assets,
         address receiver
@@ -290,7 +293,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @notice Withdraw a certain amount of collateral and transfers collateral asset's underlying asset to receiver.
     /// @param assets Amount of collateral asset to withdraw.
     /// @param receiver The receiver of the redemption.
-    /// @return underlying The assets equivalent to the redeemed shares.
+    /// @return underlying Amount of underlying asset transferred.
     function redeemUnderlying(
         uint assets,
         address receiver
@@ -337,7 +340,7 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @notice Begin the liquidation process for this vault.
     /// @dev Liquidation needs to be done in a batch.
     /// If the vault is liquidatable, this fn makes liquidator the new borrower.
-    /// Liquidator is then responsible to make this collateral healthy.
+    /// Liquidator is then responsible to make this position healthy.
     /// Liquidator may choose to wind down the position and take collateral as profit.
     function liquidate() external callThroughEVC nonReentrant {
         createVaultSnapshot();
@@ -367,11 +370,10 @@ abstract contract CollateralVaultBase is VaultBase {
     /// @notice Handles the aftermath of an external liquidation by the underlying lending protocol
     /// @dev Called when the vault's collateral was liquidated by the external protocol (e.g., Euler)
     /// @dev Steps performed:
-    /// 1. Repay remaining external debt using funds from the liquidator
-    /// 2. Calculate and provide a reward from remaining collateral to the liquidator
-    /// 3. Calculate and return some collateral to the borrower
-    /// 4. Release remaining collateral to the intermediate vault
-    /// 5. Reset the vault state so that it cannot be used again
+    /// 1. Calculate and distribute the remaining collateral in this vault among
+    ///  the liquidator, borrower and intermediate vault
+    /// 2. Repay remaining external debt using funds from the liquidator
+    /// 3. Reset the vault state so that it cannot be used again
     /// @dev Can only be called when the vault is actually in an externally liquidated state
     /// @dev Caller needs to call intermediateVault.liquidate(collateral_vault_address, collateral_vault_address, 0, 0)
     /// in the same EVC batch if there is any bad debt left at the end of this call

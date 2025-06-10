@@ -202,10 +202,16 @@ contract EulerCollateralVault is CollateralVaultBase {
             require(externalCollateralValueScaledByLiqLTV >= externalBorrowDebtValue, ExternalPositionUnhealthy());
         }
 
+        uint _maxRelease = maxRelease();
         address liquidator = _msgSender();
+
+        if (_maxRelease == 0) {
+            require(liquidator == borrower, NoLiquidationForZeroReserve());
+        }
+
         uint _maxRepay = maxRepay();
 
-        (uint liquidatorReward, uint releaseAmount, uint borrowerClaim) = splitCollateralAfterExtLiq(amount, _maxRepay, maxRelease());
+        (uint liquidatorReward, uint releaseAmount, uint borrowerClaim) = splitCollateralAfterExtLiq(amount, _maxRepay, _maxRelease);
 
         if (_maxRepay > 0) {
             // step 1: repay all external debt

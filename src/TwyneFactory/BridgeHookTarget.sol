@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: BUSL-1.1
 
 pragma solidity ^0.8.28;
 
@@ -6,6 +6,8 @@ import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.so
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
 
+/// @title BridgeHookTarget
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 contract BridgeHookTarget is IErrors {
     CollateralVaultFactory immutable collateralVaultFactory;
 

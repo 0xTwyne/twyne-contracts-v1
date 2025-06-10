@@ -56,12 +56,6 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     Base.Integrations integrations;
     Dispatch.DeployedModules modules;
 
-    TestERC20 assetTST;
-    TestERC20 assetTST2;
-
-    IEVault public eTST;
-    IEVault public eTST2;
-
     address initializeModule;
     address tokenModule;
     address vaultModule;
@@ -74,7 +68,7 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     // addresses shared in every test file, set based on chainId AKA FOUNDRY_PROFILE .env variable
     address aavePool;
     address eulerWETH;
-    // address eulerCBBTC;
+    address eulerCBBTC;
     address eulerWSTETH;
     address eulerUSDC;
     address eulerUSDS;
@@ -85,37 +79,54 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     address constant USD = address(840);
     uint256 ethPrice;
     EulerRouter eulerOnChain;
+    uint forkBlockDiff;
+
+    address[] public fixtureCollateralAssets;
+    address[] public fixtureTargetAssets;
 
     error UnknownProfile();
 
     function setUp() public virtual {
+        uint forkBlock;
         if (block.chainid == 1) { // mainnet
-            vm.rollFork(22250000);
+            forkBlock = 22440000;
+            forkBlockDiff = block.number - forkBlock;
+            vm.rollFork(forkBlock);
             aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
             eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
-            // eulerCBBTC = 0x056f3a2E41d2778D3a0c0714439c53af2987718E;
+            eulerCBBTC = 0x056f3a2E41d2778D3a0c0714439c53af2987718E;
             eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
             eulerUSDS = 0x1cA03621265D9092dC0587e1b50aB529f744aacB;
             eulerOnChain = EulerRouter(0x83B3b76873D36A28440cF53371dF404c42497136);
+            fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
+            fixtureTargetAssets = [eulerUSDC, eulerUSDS];
         } else if (block.chainid == 8453) { // base
-            vm.rollFork(29270000);
+            forkBlock = 29270000;
+            forkBlockDiff = block.number - forkBlock;
+            vm.rollFork(forkBlock);
             aavePool = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
-            // eulerCBBTC = 0x882018411Bc4A020A879CEE183441fC9fa5D7f8B;
+            eulerCBBTC = 0x882018411Bc4A020A879CEE183441fC9fa5D7f8B;
             eulerWSTETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerUSDS = 0x556d518FDFDCC4027A3A1388699c5E11AC201D8b;
             eulerOnChain = EulerRouter(0x6E183458600e66047A0f4D356d9DAa480DA1CA59);
-        } else if (block.chainid == 146) {
-            vm.rollFork(19185510);
-            aavePool = 0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3;
-            eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
-            // eulerCBBTC = address(0); // no BTC pool on Sonic Euler yet
-            eulerWSTETH = 0x05d57366B862022F76Fe93316e81E9f24218bBfC;
-            eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
-            eulerUSDS = 0xB38D431e932fEa77d1dF0AE0dFE4400c97e597B8; // actually this is scUSD
-            eulerOnChain = EulerRouter(0x231811a9574dDE19e49f72F7c1cAC3085De6971a);
+            fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
+            fixtureTargetAssets = [eulerUSDC, eulerUSDS];
+        // } else if (block.chainid == 146) {
+        //     forkBlock = 19185510;
+        //     forkBlockDiff = block.number - forkBlock;
+        //     vm.rollFork(forkBlock);
+        //     aavePool = 0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3;
+        //     eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
+        //     // eulerCBBTC = address(0); // no BTC pool on Sonic Euler yet
+        //     eulerWSTETH = 0x05d57366B862022F76Fe93316e81E9f24218bBfC;
+        //     eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
+        //     eulerUSDS = 0xB38D431e932fEa77d1dF0AE0dFE4400c97e597B8; // actually this is scUSD
+        //     eulerOnChain = EulerRouter(0x231811a9574dDE19e49f72F7c1cAC3085De6971a);
+        //     fixtureCollateralAssets = [eulerWETH, eulerWSTETH];
+        //     fixtureTargetAssets = [eulerUSDC, eulerUSDS];
         } else {
             revert UnknownProfile();
         }
@@ -176,27 +187,6 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
         factory.setImplementation(evaultImpl);
         collateralVaultFactory.setBeacon(eulerUSDC, address(new UpgradeableBeacon(eulerUSDCCollateralVaultImpl, admin)));
         collateralVaultFactory.setBeacon(eulerWETH, address(new UpgradeableBeacon(eulerWETHCollateralVaultImpl, admin)));
-        vm.stopPrank();
-
-        assetTST = new TestERC20("Test Token", "TST", 18, false);
-        assetTST2 = new TestERC20("Test Token 2", "TST2", 18, false);
-
-        vm.startPrank(admin);
-        eTST = IEVault(
-            factory.createProxy(address(0), true, abi.encodePacked(address(assetTST), address(oracle), unitOfAccount))
-        );
-        eTST.setHookConfig(address(0), 0);
-        eTST.setInterestRateModel(address(new IRMTestDefault()));
-        eTST.setMaxLiquidationDiscount(0.2e4);
-        eTST.setFeeReceiver(feeReceiver);
-
-        eTST2 = IEVault(
-            factory.createProxy(address(0), true, abi.encodePacked(address(assetTST2), address(oracle), unitOfAccount))
-        );
-        eTST2.setHookConfig(address(0), 0);
-        eTST2.setInterestRateModel(address(new IRMTestDefault()));
-        eTST2.setMaxLiquidationDiscount(0.2e4);
-        eTST2.setFeeReceiver(feeReceiver);
         vm.stopPrank();
     }
 

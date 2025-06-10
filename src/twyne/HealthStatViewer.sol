@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: MIT
 
 pragma solidity ^0.8.28;
 
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EulerCollateralVault, VaultManager, EulerRouter} from "src/twyne/EulerCollateralVault.sol";
 
+/// @title HealthStatViewer
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @dev functions to view liquidation health related stats of collateral vaults. Useful for frontend.
 contract HealthStatViewer {
     uint internal constant MAXFACTOR = 1e4;

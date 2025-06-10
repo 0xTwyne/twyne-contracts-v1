@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: BUSL-1.1
 
 pragma solidity ^0.8.28;
 
@@ -17,6 +17,7 @@ import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {ReentrancyGuardUpgradeable} from "openzeppelin-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 /// @title CollateralVaultBase
+/// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @notice Provides general vault functionality applicable to any external integration.
 /// @dev This isn't a ERC4626 vault, nor does it comply with ERC20 specification.
 /// @dev It only supports name, symbol, balanceOf(address) and reverts for all other ERC20 fns.

@@ -154,21 +154,18 @@ contract EulerCollateralVault is CollateralVaultBase {
     }
 
     /// @notice custom balanceOf implementation
+    /// @dev returns 0 on external liquidation, because:
+    /// handleExternalLiquidation() sets this vault's collateral balance to 0, balanceOf is then
+    /// called by the intermediate vault when someone settles the remaining bad debt.
     function balanceOf(address user) external view nonReentrantRO override returns (uint) {
         if (user != address(this)) return 0;
         if (borrower == address(0)) return 0;
 
         uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
-        uint amount = IERC20(asset()).balanceOf(address(this));
-        uint _maxRelease = maxRelease();
+        // return 0 if externally liquidated
+        if (_totalAssetsDepositedOrReserved > IERC20(asset()).balanceOf(address(this))) return 0;
 
-        // If this vault has been externally liquidated
-        if (_totalAssetsDepositedOrReserved > amount) {
-            (,uint releaseAmount,) = splitCollateralAfterExtLiq(amount, maxRepay(), _maxRelease);
-            return releaseAmount;
-        }
-
-        return _totalAssetsDepositedOrReserved - _maxRelease;
+        return _totalAssetsDepositedOrReserved - maxRelease();
     }
 
     /// @notice splits remaining collateral between liquidator, intermediate vault and borrow
@@ -201,7 +198,8 @@ contract EulerCollateralVault is CollateralVaultBase {
 
         {
             (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
-            require(externalCollateralValueScaledByLiqLTV > externalBorrowDebtValue, ExternalPositionUnhealthy());
+            // Equality is needed for the complete liquidation case (entire debt and collateral is taken by Euler liquidator)
+            require(externalCollateralValueScaledByLiqLTV >= externalBorrowDebtValue, ExternalPositionUnhealthy());
         }
 
         address liquidator = _msgSender();

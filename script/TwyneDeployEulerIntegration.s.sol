@@ -291,14 +291,14 @@ contract TwyneDeployEulerIntegration is Script {
         vaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
-        // Set CrossAdaptor for handling the external liquidation case
+        // Set CrossAdapter for handling the external liquidation case
         address baseAsset = eulerUSDC;
         address crossAsset = IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount();
         address quoteAsset = IEVault(eeWETH_intermediate_vault.asset()).asset();
         address oracleBaseCross = oracleRouter.getConfiguredOracle(baseAsset, crossAsset);
         address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
-        CrossAdapter crossAdaptorOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
-        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdaptorOracle))));
+        CrossAdapter crossAdapterOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
+        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdapterOracle))));
 
         // Next: Deploy collateral vault
         deployer_collateral_vault = EulerCollateralVault(

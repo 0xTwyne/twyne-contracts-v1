@@ -257,17 +257,6 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         return this.checkVaultStatus.selector;
     }
 
-    /// @dev checkVaultStatus() is responsible to ensure this vault is in correct state.
-    /// Since this vault is used by a single borrower, checkVaultStatus() is enough to ensure the account is in correct state.
-    /// So we just return the selector here.
-    function checkAccountStatus(
-        address /*account*/,
-        address[] calldata /*collaterals*/
-    ) external view onlyEVCWithChecksInProgress returns (bytes4) {
-
-        return this.checkAccountStatus.selector;
-    }
-
     ///
     // Asset transfer functions
     ///

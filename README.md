@@ -98,4 +98,4 @@ Note: If you will reuse an existing EVK deployment instead of spending gas on a 
 3. Copy the output files with deployed addresses at evk-periphery/script/deployments/onchain/8453/output to the tech-notes/ repo in a new directory for this specific deployment to store the addresses in a shared place.
 4. Now back in the playground repo, make sure the .env file has the production private keys with gas to deploy to Base. Also edit script/TwyneDeployEulerIntegration.s.sol so `productionSetup()` contains the addresses of the contracts just deployed by the EVK deploy script. Finally, edit script/TwyneDeployEulerIntegration.s.sol to comment out everything in `run()` except `productionSetup()` and `twyneStuff()`.
 5. Run the Twyne deploy script:
-`forge script script/TwyneDeployEulerIntegration.s.sol:TwyneDeployEulerIntegration --broadcast -vv`
+`forge script script/TwyneDeployEulerIntegration.s.sol:TwyneDeployEulerIntegration --broadcast -vv --verify --etherscan-api-key <YOUR_ETHERSCAN_API_KEY>`

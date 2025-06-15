@@ -24,3 +24,5 @@ _corpus/
 # Coverage directory
 coverage/
 *.info
+
+TwyneAddresses_output.json

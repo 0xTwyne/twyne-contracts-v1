@@ -304,13 +304,20 @@ contract TwyneDeployEulerIntegration is Script {
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
         // Set CrossAdapter for handling the external liquidation case
-        address baseAsset = eulerUSDC;
+        address baseAsset = USDC;
         address crossAsset = IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount();
         address quoteAsset = IEVault(eeWETH_intermediate_vault.asset()).asset();
-        address oracleBaseCross = oracleRouter.getConfiguredOracle(baseAsset, crossAsset);
+        address oracleBaseCross = EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(baseAsset, crossAsset);
         address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
         CrossAdapter crossAdapterOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
         vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdapterOracle))));
+        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, USD, oracleBaseCross)));
+
+        // Add assertions to verify the necessary oracle paths are properly setup
+        require(vaultManager.oracleRouter().getQuote(1, eulerWETH, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
+        require(vaultManager.oracleRouter().getQuote(1, eeWETH_intermediate_vault.asset(), IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount()) != 0, "bad setup for target asset oracle"); // USDC -> WETH
+        require(vaultManager.oracleRouter().getQuote(1, USDC, WETH) != 0, "bad setup for target asset oracle"); // USDC -> WETH
+        require(vaultManager.oracleRouter().getQuote(1, baseAsset, quoteAsset) != 0, "bad setup for target asset oracle"); // USDC -> WETH
 
         // Next: Deploy collateral vault
         deployer_collateral_vault = EulerCollateralVault(

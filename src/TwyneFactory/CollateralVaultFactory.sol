@@ -46,7 +46,7 @@ contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors, IEvents 
 
     /// @notice callable only by a collateral vault in the case where it has been liquidated
     function setCollateralVaultLiquidated(address liquidator) external {
-        require(isCollateralVault[msg.sender], NotIntermediateVault());
+        require(isCollateralVault[msg.sender], NotCollateralVault());
         collateralVaults[liquidator].push(msg.sender);
         emit T_SetCollateralVaultLiquidated(msg.sender, liquidator);
     }

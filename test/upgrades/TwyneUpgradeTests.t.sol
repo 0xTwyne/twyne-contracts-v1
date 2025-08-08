@@ -15,7 +15,7 @@ import {VaultManager} from "src/twyne/VaultManager.sol";
 /// @title Twyne Collateral Vault v1 Upgrade Tests
 /// @notice Tests for the first upgrade of Collateral Vaults to v1. Independent of other tests.
 /// @dev This upgrade updates the `teleport` function to allow Euler subaccounts to teleport their position to Twyne.
-contract EulerTestEdgeCases is Test {
+contract TwyneUpgradeTests is Test {
     error UnknownProfile();
 
     address USDC;

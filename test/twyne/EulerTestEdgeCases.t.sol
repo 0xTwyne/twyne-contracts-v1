@@ -39,7 +39,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // User creates a 2nd type of collateral vault after already creating a 1st collateral vault
     function test_e_createWSTETHCollateralVault() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         // Alice creates eWSTETH collateral vault with USDC target asset
         vm.startPrank(alice);
@@ -65,7 +65,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Confirm a user can have multiple identical collateral vaults at any given time
     function test_e_secondVaultCreationSameUser() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         vm.startPrank(alice);
         // Alice creates another vault with same params
@@ -164,7 +164,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Make sure eve is not allowed to deposit into Alice's vault
     function test_e_eveCantDepositIntoAliceVault() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         vm.startPrank(eve);
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
@@ -188,7 +188,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Collateral vault does not support standard ERC20 functions like transfer, transferFrom, etc.
     function test_e_aliceCantTransferCollateralShares() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         vm.startPrank(alice);
 
@@ -277,7 +277,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Test the scenario of pausing the protocol
     function test_e_pauseProtocol() public noGasMetering {
-        e_collateralDepositWithoutBorrow(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
 
         vm.startPrank(bob);
         eeWETH_intermediate_vault.deposit(1 ether, bob);
@@ -374,8 +374,8 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Governance upgrades proxy
     function test_e_proxyUpgrade() public {
-        e_createCollateralVault(eulerWETH);
-        assertEq(alice_collateral_vault.version(), 0);
+        e_createCollateralVault(eulerWETH, 0.9e4);
+        assertEq(alice_collateral_vault.version(), 1);
         UpgradeableBeacon beacon = UpgradeableBeacon(collateralVaultFactory.collateralVaultBeacon(eulerUSDC));
         vm.startPrank(admin);
         // set new implementation contract
@@ -387,7 +387,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // Governance upgrades proxy
     function test_e_proxyUpgrade_storageSetInConstructor() public {
         e_firstBorrowFromEulerViaCollateral(eulerWETH);
-        assertEq(alice_collateral_vault.version(), 0);
+        assertEq(alice_collateral_vault.version(), 1);
         UpgradeableBeacon beacon = UpgradeableBeacon(collateralVaultFactory.collateralVaultBeacon(eulerUSDC));
 
         vm.startPrank(admin);
@@ -426,7 +426,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Test collateral vault revert cases for test coverage reasons
     function test_e_collateralVaultReverts() public {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         vm.startPrank(alice);
 
@@ -485,14 +485,14 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(TwyneErrors.RepayingMoreThanMax.selector);
         alice_collateral_vault.repay(type(uint256).max - 1);
 
-        vm.expectRevert(TwyneErrors.NotIntermediateVault.selector);
+        vm.expectRevert(TwyneErrors.NotCollateralVault.selector);
         collateralVaultFactory.setCollateralVaultLiquidated(address(this));
 
         vm.stopPrank();
     }
 
     function test_e_increaseTestCoverage() public {
-        e_collateralDepositWithoutBorrow(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
 
         address[] memory collats = new address[](2);
         collats[0] = address(0);
@@ -517,7 +517,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // VaultManager.sol tests for coverage
 
     function test_e_vaultManagerSetterReverts() public noGasMetering {
-        e_collateralDepositWithoutBorrow(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
 
         vm.startPrank(alice);
         vm.expectRevert(TwyneErrors.CallerNotOwnerOrCollateralVaultFactory.selector);
@@ -544,7 +544,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     }
 
     function test_e_setNewFactory() public noGasMetering {
-        e_collateralDepositWithoutBorrow(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
 
         assertEq(twyneVaultManager.collateralVaultFactory(), address(collateralVaultFactory), "collateral vault factory incorrectly set before update");
         vm.startPrank(admin);
@@ -555,7 +555,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     }
 
     function test_e_removeAssetsVaultsFirstIndex() public noGasMetering {
-        e_collateralDepositWithoutBorrow(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
 
         uint arrayIndex = 0;
 
@@ -657,7 +657,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         collateralVaultFactory.setVaultManager(address(twyneVaultManager));
 
         twyneVaultManager.setOracleRouter(address(oracleRouter));
-        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 0.98e4);
+        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 0.9e4);
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newEVKIntermediateVault(eulerWETH, address(oracleRouter), USD);
@@ -669,8 +669,8 @@ contract EulerTestEdgeCases is EulerTestBase {
         address baseAsset = eulerUSDC;
         address crossAsset = IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount();
         address quoteAsset = IEVault(eeWETH_intermediate_vault.asset()).asset();
-        address oracleBaseCross = oracleRouter.getConfiguredOracle(baseAsset, crossAsset);
-        address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
+        address oracleBaseCross = EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(baseAsset, crossAsset);
+        address oracleCrossQuote = EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(quoteAsset, crossAsset);
         CrossAdapter crossAdaptorOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
         twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdaptorOracle))));
 
@@ -711,7 +711,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // Can setting an account operator allow that operator to control the vault's TwyneLiqLTV? Answer is yes
     // We could use this feature to allow users to assign Twyne governance to dynamically control their position to keep them safe
     function test_e_setOperatorChangeTwyneLiqLTVNoBorrow() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         vm.startPrank(alice);
         // set bob as account operator
@@ -783,7 +783,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     }
 
     function test_e_HealthStatViewerWithoutLiability() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
 
         uint256 externalHF;
         uint256 internalHF;
@@ -824,7 +824,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Intermediate vault reverts during account status check,
         // since it doesn't allow borrowing against 0 collateral.
         vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        teleporter_collateral_vault.teleport(0, B);
+        teleporter_collateral_vault.teleport(0, B, teleporter);
         vm.stopPrank();
     }
 
@@ -1238,4 +1238,114 @@ contract EulerTestEdgeCases is EulerTestBase {
     // This alters the protocol config for a specific vault. If none is set, the default protocol config is used
     // It may be useful to monitor for whether this is ever called by Euler, but no obvious impact exists to Twyne
     // No impact to Twyne and no action required from Twyne
+
+    function e_createDebtPositionOnEuler(address user, address subAccount1) internal {
+        IEVC eulerEVC = IEVC(IEVault(eulerUSDC).EVC());
+
+        // Give user some collateral tokens
+        uint256 collateralAmount = 10 ether;
+        deal(address(IEVault(eulerWETH).asset()), user, collateralAmount);
+
+        // User deposits collateral to Euler for subAccount1
+        vm.startPrank(user);
+        IERC20(IEVault(eulerWETH).asset()).approve(eulerWETH, collateralAmount);
+        IEVault(eulerWETH).deposit(collateralAmount, subAccount1);
+        vm.stopPrank();
+
+        uint eulerWETHCollateralAmount = IEVault(eulerWETH).balanceOf(subAccount1);
+
+        // Step 1: Open a borrow position on Euler using subAccount1 through EVC batch
+        vm.startPrank(user);
+
+        // Enable controller and collateral for subAccount1
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(eulerEVC),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(IEVC.enableController, (subAccount1, eulerUSDC))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(eulerEVC),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(IEVC.enableCollateral, (subAccount1, eulerWETH))
+        });
+
+        // Borrow USDC against eulerWETH collateral
+        uint256 borrowAmount = 5000 * 10**6; // 5000 USDC
+        items[2] = IEVC.BatchItem({
+            targetContract: eulerUSDC,
+            onBehalfOfAccount: subAccount1,
+            value: 0,
+            data: abi.encodeCall(IEVault(eulerUSDC).borrow, (borrowAmount, user))
+        });
+
+        eulerEVC.batch(items);
+        vm.stopPrank();
+
+        // Verify the borrow position is created
+        assertEq(IEVault(eulerUSDC).debtOf(subAccount1), borrowAmount, "Debt not created correctly");
+        assertEq(IEVault(eulerWETH).balanceOf(subAccount1), eulerWETHCollateralAmount, "Collateral balance incorrect");
+    }
+
+    // Test teleport function with subaccount
+    function test_teleportWithSubaccount() public {
+        e_creditDeposit(eulerWETH);
+        // Setup: Create a user with collateral and a subaccount
+        address user = makeAddr("user");
+        address subAccount1 = getSubAccount(user, 1);
+        vm.label(subAccount1, "subAccount1");
+        IEVC eulerEVC = IEVC(IEVault(eulerUSDC).EVC());
+        vm.label(address(eulerEVC), "eulerEVC");
+
+        e_createDebtPositionOnEuler(user, subAccount1);
+
+        // Step 2: Create a collateral vault and teleport the position
+        vm.startPrank(user);
+        EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault(eulerWETH, eulerUSDC, twyneLiqLTV)
+        );
+        vm.stopPrank();
+        vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
+        vm.label(address(teleporter_collateral_vault.intermediateVault()), "intermediateVault");
+
+        // Fetch the eulerUSDC beacon from collateral vault factory
+        address currentBeacon = collateralVaultFactory.collateralVaultBeacon(eulerUSDC);
+        vm.label(currentBeacon, "currentBeacon");
+        address oldImplementation = UpgradeableBeacon(currentBeacon).implementation();
+        vm.label(oldImplementation, "implementation");
+        require(currentBeacon != address(0), "Beacon not found for eulerUSDC");
+
+        uint collateralAmount = IERC20(eulerWETH).balanceOf(subAccount1);
+        uint borrowAmount = IEVault(eulerUSDC).debtOf(subAccount1);
+
+        // Approve and teleport through batch
+        vm.startPrank(user);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: eulerWETH,
+            onBehalfOfAccount: subAccount1,
+            value: 0,
+            data: abi.encodeCall(IERC20.approve, (address(teleporter_collateral_vault), collateralAmount))
+        });
+        eulerEVC.batch(items);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: address(teleporter_collateral_vault),
+            onBehalfOfAccount: user,
+            value: 0,
+            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, borrowAmount, subAccount1))
+        });
+
+        evc.batch(items);
+        vm.stopPrank();
+
+        // Verify the teleport was successful
+        assertEq(IEVault(eulerUSDC).debtOf(subAccount1), 0, "User debt should be 0 after teleport");
+        assertEq(IEVault(eulerWETH).balanceOf(subAccount1), 0, "User collateral should be 0 after teleport");
+        assertEq(IEVault(eulerUSDC).debtOf(address(teleporter_collateral_vault)), borrowAmount, "Vault should have the debt");
+        assertGt(teleporter_collateral_vault.totalAssetsDepositedOrReserved(), 0, "Vault should have assets");
+    }
+
 }

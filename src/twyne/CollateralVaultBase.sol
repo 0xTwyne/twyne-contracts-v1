@@ -262,7 +262,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     // Asset transfer functions
     ///
 
-    /// @notice Deposits a certain amount of assets for a receiver.
+    /// @notice Deposits a certain amount of assets.
     /// @param assets The assets to deposit.
     function deposit(uint assets)
         public
@@ -279,7 +279,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         emit T_Deposit(assets);
     }
 
-    /// @notice Deposits a certain amount of underlying asset for a receiver.
+    /// @notice Deposits a certain amount of underlying asset.
     /// @param underlying The underlying assets to deposit.
     function depositUnderlying(uint underlying)
         public
@@ -432,6 +432,4 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         _handleExcessCredit(__invariantCollateralAmount);
         emit T_Rebalance();
     }
-
-    function teleport(uint toDeposit, uint toBorrow) external virtual;
 }

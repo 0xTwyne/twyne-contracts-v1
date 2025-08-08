@@ -269,4 +269,97 @@ contract EulerFrontendTests is EulerTestBase {
         assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Collateral vault is not empty!");
     }
 
+    function test_e_frontend_depositUnderlyingViaTwyneEVC() external noGasMetering {
+        // Bob convert WETH from eulerWETH
+        vm.startPrank(bob);
+        // First, approve permit2 to allow permit2 usage in batch
+        IERC20(WETH).approve(permit2, type(uint).max);
+        Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
+
+        IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
+            details: IAllowanceTransfer.PermitDetails({
+                token: WETH,
+                amount: uint160(CREDIT_LP_AMOUNT),
+                expiration: type(uint48).max,
+                nonce: 0
+            }),
+            spender: address(evc),
+            sigDeadline: type(uint256).max
+        });
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](4);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: permit2,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
+                bob,
+                permitSingle,
+                permit2Signer.signPermitSingle(bobKey, permitSingle)
+            )
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: permit2,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint160,address)",
+                bob,
+                address(evc),
+                CREDIT_LP_AMOUNT,
+                WETH
+            )
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: WETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IERC20(WETH).approve, (eulerWETH, type(uint).max))
+        });
+        items[3] = IEVC.BatchItem({
+            targetContract: eulerWETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IEVault(eulerWETH).deposit, (CREDIT_LP_AMOUNT, bob))
+        });
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+        evc.batch(items);
+        vm.stopPrank();
+
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+    }
+
+    function test_e_frontend_depositETHViaTwyneEVC() external noGasMetering {
+        // Bob converts ETH to eulerWETH
+        vm.startPrank(bob);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+
+        uint bal = bob.balance;
+        console2.log(bal);
+        items[0] = IEVC.BatchItem({
+            targetContract: WETH,
+            onBehalfOfAccount: bob,
+            value: bal,
+            data: abi.encodeWithSignature("deposit()")
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: WETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IERC20(WETH).approve, (eulerWETH, type(uint).max))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: eulerWETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IEVault(eulerWETH).deposit, (bal, bob))
+        });
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+        evc.batch{value: bal}(items);
+        vm.stopPrank();
+
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+    }
 }

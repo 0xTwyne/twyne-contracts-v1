@@ -97,12 +97,12 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             eulerCBBTC = 0x056f3a2E41d2778D3a0c0714439c53af2987718E;
             eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
-            eulerUSDS = 0x1cA03621265D9092dC0587e1b50aB529f744aacB;
+            eulerUSDS = 0x07F9A54Dc5135B9878d6745E267625BF0E206840;
             eulerOnChain = EulerRouter(0x83B3b76873D36A28440cF53371dF404c42497136);
             fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
             fixtureTargetAssets = [eulerUSDC, eulerUSDS];
         } else if (block.chainid == 8453) { // base
-            forkBlock = 29270000;
+            forkBlock = 33455299;
             forkBlockDiff = block.number - forkBlock;
             vm.rollFork(forkBlock);
             aavePool = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
@@ -135,6 +135,7 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
         WETH = IEVault(eulerWETH).asset();
         WSTETH = IEVault(eulerWSTETH).asset();
         USDS = IEVault(eulerUSDS).asset();
+
         vm.label(USDC, "USDC");
         vm.label(WETH, "WETH");
         vm.label(WSTETH, "WSTETH");
@@ -193,36 +194,5 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     function getSubAccount(address primary, uint8 subAccountId) internal pure returns (address) {
         require(subAccountId <= 256, "invalid subAccountId");
         return address(uint160(uint160(primary) ^ subAccountId));
-    }
-}
-
-contract MockHook is IHookTarget {
-    error E_OnlyAssetCanDeposit();
-    error E_OperationDisabled();
-
-    function isHookTarget() external pure override returns (bytes4) {
-        return this.isHookTarget.selector;
-    }
-
-    // deposit is only allowed for the asset
-    function deposit(uint256, address) external view {
-        address asset = IEVault(msg.sender).asset();
-
-        // these calls are just to test if there's no RO-reentrancy for the hook target
-        IEVault(msg.sender).totalBorrows();
-        IEVault(msg.sender).balanceOf(address(this));
-
-        if (asset != caller()) revert E_OnlyAssetCanDeposit();
-    }
-
-    // all the other hooked ops are disabled
-    fallback() external {
-        revert E_OperationDisabled();
-    }
-
-    function caller() internal pure returns (address _caller) {
-        assembly {
-            _caller := shr(96, calldataload(sub(calldatasize(), 20)))
-        }
     }
 }

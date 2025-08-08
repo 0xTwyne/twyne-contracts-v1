@@ -84,6 +84,7 @@ contract TwyneDeployEulerIntegration is Script {
     uint constant twyneLiqLTV = 0.90e4;
 
     error UnknownProfile();
+    error InvalidCollateral();
 
     struct TwyneAddresses {
         address collateralVaultFactory;
@@ -134,7 +135,6 @@ contract TwyneDeployEulerIntegration is Script {
         // if (vm.envBool("PROD")) { // Run script against on-chain RPC
             productionSetup(); // sets up on-chain EVK deployment addresses from evk-periphery script
             twyneStuff();
-            // setAdminOwnership(); // sets new multisig admin owner for addresses
         // } else if (!vm.envBool("PROD")) { // run without on-chain dependency
             // evkStuff(); // deploys fresh EVK contracts, simulating the evk-periphery script
             // twyneStuff();
@@ -196,6 +196,7 @@ contract TwyneDeployEulerIntegration is Script {
         vaultManager.setOracleResolvedVault(address(new_vault), true);
         vaultManager.setOracleResolvedVault(_asset, true); // need to set this for recursive resolveOracle() lookup
         address eulerExternalOracle = EulerRouter(IEVault(_asset).oracle()).getConfiguredOracle(IEVault(_asset).asset(), USD);
+        assert(keccak256(abi.encodePacked(EulerRouter(eulerExternalOracle).name())) == keccak256(abi.encodePacked("ChainlinkOracle")) || keccak256(abi.encodePacked(EulerRouter(eulerExternalOracle).name())) == keccak256(abi.encodePacked("CrossAdapter")));
         vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_asset).asset(), USD, eulerExternalOracle)));
         vaultManager.setIntermediateVault(new_vault);
         new_vault.setGovernorAdmin(address(vaultManager));
@@ -254,15 +255,15 @@ contract TwyneDeployEulerIntegration is Script {
     function productionSetup() public {
         address oracleRouterFactory;
         if (block.chainid == 8453) {
-            oracleRouterFactory = 0x45A2A6b0f126840821748A4d21b5cEdAFA84e701;
-            evc = EthereumVaultConnector(payable(0x00F3BE2c13FB10129E91dff8EF667e503C7a961E));
-            factory = GenericFactory(0x599E16AD5C43e95760c9174E685d57D27A57BEd4);
-            protocolConfig = ProtocolConfig(0x359E4c72Cc58896743e42927594b15a359962257);
+            oracleRouterFactory = 0x72735e5dd42EDc979c600766532eA704842CfB7b;
+            evc = EthereumVaultConnector(payable(0xC36aED7b7816aA21B660a33a637a8f9B9B70ad6c));
+            factory = GenericFactory(0xd5e966dB359f1cB2A01280fCCBEB839Ac572CE35);
+            protocolConfig = ProtocolConfig(0x3b68711EF6c1988c96CBD32d929b76cB09b579Ea);
         } else if (block.chainid == 1) {
-            oracleRouterFactory = 0x45A2A6b0f126840821748A4d21b5cEdAFA84e701;
-            evc = EthereumVaultConnector(payable(0x0C9a3dd6b8F28529d72d7f9cE918D493519EE383));
-            factory = GenericFactory(0x29a56a1b8214D9Cf7c5561811750D5cBDb45CC8e);
-            protocolConfig = ProtocolConfig(0x4cD6BF1D183264c02Be7748Cb5cd3A47d013351b);
+            oracleRouterFactory = 0x72735e5dd42EDc979c600766532eA704842CfB7b;
+            evc = EthereumVaultConnector(payable(0xC36aED7b7816aA21B660a33a637a8f9B9B70ad6c));
+            factory = GenericFactory(0xd5e966dB359f1cB2A01280fCCBEB839Ac572CE35);
+            protocolConfig = ProtocolConfig(0x3b68711EF6c1988c96CBD32d929b76cB09b579Ea);
         } else {
             console2.log("Only supports Base and mainnet right now");
             revert UnknownProfile();
@@ -301,6 +302,7 @@ contract TwyneDeployEulerIntegration is Script {
         eeWETH_intermediate_vault = newIntermediateVault(eulerWETH, address(oracleRouter), USD);
 
         vaultManager.setExternalLiqBuffer(eulerWETH, 1e4);
+        require(IEVault(eulerUSDC).LTVBorrow(eeWETH_intermediate_vault.asset()) != 0, InvalidCollateral());
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
         // Set CrossAdapter for handling the external liquidation case
@@ -314,10 +316,10 @@ contract TwyneDeployEulerIntegration is Script {
         vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, USD, oracleBaseCross)));
 
         // Add assertions to verify the necessary oracle paths are properly setup
-        require(vaultManager.oracleRouter().getQuote(1, eulerWETH, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
-        require(vaultManager.oracleRouter().getQuote(1, eeWETH_intermediate_vault.asset(), IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount()) != 0, "bad setup for target asset oracle"); // USDC -> WETH
-        require(vaultManager.oracleRouter().getQuote(1, USDC, WETH) != 0, "bad setup for target asset oracle"); // USDC -> WETH
-        require(vaultManager.oracleRouter().getQuote(1, baseAsset, quoteAsset) != 0, "bad setup for target asset oracle"); // USDC -> WETH
+        require(vaultManager.oracleRouter().getQuote(1e16, eulerWETH, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
+        require(vaultManager.oracleRouter().getQuote(1e16, eeWETH_intermediate_vault.asset(), IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount()) != 0, "bad setup for target asset oracle"); // eWETH -> USD
+        require(vaultManager.oracleRouter().getQuote(1e16, USDC, WETH) != 0, "bad setup for target asset oracle"); // USDC -> WETH
+        require(vaultManager.oracleRouter().getQuote(1e16, baseAsset, quoteAsset) != 0, "bad setup for target asset oracle"); // USDC -> WETH
 
         // Next: Deploy collateral vault
         deployer_collateral_vault = EulerCollateralVault(
@@ -350,21 +352,5 @@ contract TwyneDeployEulerIntegration is Script {
         string memory serializedTwyneAddresses = serializeTwyneAddresses(twyneAddresses);
 
         vm.writeJson(serializedTwyneAddresses, "./TwyneAddresses_output.json");
-    }
-
-    function setAdminOwnership() public {
-        // Set production deployment owner
-        vm.startBroadcast(deployerKey);
-        factory.setUpgradeAdmin(admin);
-        collateralVaultFactory.transferOwnership(admin);
-        vaultManager.doCall(address(oracleRouter), 0, abi.encodeCall(oracleRouter.transferGovernance, admin));
-        vaultManager.transferOwnership(admin);
-        address beaconAddr = collateralVaultFactory.collateralVaultBeacon(eulerUSDC);
-        UpgradeableBeacon(beaconAddr).transferOwnership(admin);
-        require(factory.upgradeAdmin() == admin, "factory needs to be set to correct admin");
-        require(collateralVaultFactory.owner() == admin, "collateralVaultFactory needs to be set to correct admin");
-        require(oracleRouter.governor() == admin, "factory needs to be set to correct admin");
-        require(vaultManager.owner() == admin, "vaultManager needs to be set to correct admin");
-        vm.stopBroadcast();
     }
 }

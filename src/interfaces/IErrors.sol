@@ -17,6 +17,7 @@ interface IErrors {
     error NotExternallyLiquidated(); // 0xdbd904f5
     error NotIntermediateVault(); // 0x8a6a3c99
     error NoLiquidationForZeroReserve(); // 0x818e1580
+    error OnlyWETH(); // 0x01f180c9
     error ReceiverNotBorrower(); // 0x4a1d1a97
     error ReceiverNotCollateralVault(); // 0x9b6e6f6b
     error Reentrancy(); // 0xab143c06

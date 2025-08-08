@@ -50,7 +50,7 @@ contract EulerCollateralVault is CollateralVaultBase {
 
     /// @dev increment the version for proxy upgrades
     function version() external override pure returns (uint) {
-        return 0;
+        return 1;
     }
 
     ///
@@ -233,7 +233,7 @@ contract EulerCollateralVault is CollateralVaultBase {
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault
-    function teleport(uint toDeposit, uint toBorrow) external override onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
+    function teleport(uint toDeposit, uint toBorrow, address subAccount) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
 
         totalAssetsDepositedOrReserved += toDeposit;
@@ -244,7 +244,7 @@ contract EulerCollateralVault is CollateralVaultBase {
             targetContract: asset(),
             onBehalfOfAccount: address(this),
             value: 0,
-            data: abi.encodeCall(IERC20.transferFrom, (borrower, address(this), toDeposit)) // needs allowance
+            data: abi.encodeCall(IERC20.transferFrom, (subAccount, address(this), toDeposit)) // needs allowance
         });
         items[1] = IEVC.BatchItem({
             targetContract: targetVault,
@@ -256,7 +256,7 @@ contract EulerCollateralVault is CollateralVaultBase {
             targetContract: targetVault,
             onBehalfOfAccount: address(this),
             value: 0,
-            data: abi.encodeCall(IEVault(targetVault).repay, (toBorrow, borrower))
+            data: abi.encodeCall(IEVault(targetVault).repay, (toBorrow, subAccount))
         });
         eulerEVC.batch(items);
 

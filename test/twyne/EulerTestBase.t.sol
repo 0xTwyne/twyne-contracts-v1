@@ -29,14 +29,13 @@ contract EulerTestBase is OverCollateralizedTestBase {
         // Bob deposits into intermediate_vault to earn boosted yield
         vm.startPrank(bob);
         IERC20(collateralAssets).approve(address(intermediate_vault), type(uint256).max);
-        if (IERC20(IEVault(collateralAssets).asset()).decimals() < 18) {
-            CREDIT_LP_AMOUNT /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
-            COLLATERAL_AMOUNT /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
-            INITIAL_DEALT_ETOKEN /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
-            intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
-        } else {
-            intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
+        uint8 decimals = IERC20(IEVault(collateralAssets).asset()).decimals();
+        if (decimals < 18) {
+            CREDIT_LP_AMOUNT /= (10 ** (18 - decimals));
+            COLLATERAL_AMOUNT /= (10 ** (18 - decimals));
+            INITIAL_DEALT_ETOKEN /= (10 ** (18 - decimals));
         }
+        intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
         vm.stopPrank();
 
         assertEq(intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT, "Incorrect CREDIT_LP_AMOUNT deposited");
@@ -1149,8 +1148,11 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
         uint256 depositAmount = 1e18;
 
-        if (IERC20(IEVault(collateralAssets).asset()).decimals() < 18) {
-            depositAmount /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
+        {
+            uint8 decimals = IERC20(IEVault(collateralAssets).asset()).decimals();
+            if (decimals < 18) {
+                depositAmount /= (10 ** (18 - decimals));
+            }
         }
 
         // Give alice underlying assets
@@ -1338,4 +1340,71 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
     // TODO Test the scenario where a fake intermediate vault is created
     // and the borrow from it causes near-instant liquidation for the user
+
+    function e_skim(address collateralAssets) public noGasMetering {
+        // Setup: Alice creates a collateral vault and deposits
+        e_collateralDepositWithBorrow(collateralAssets);
+
+        vm.startPrank(alice);
+
+        // Initial state
+        uint256 initialTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint256 initialVaultBalance = IERC20(collateralAssets).balanceOf(address(alice_collateral_vault));
+        uint initialBorrow = alice_collateral_vault.maxRepay();
+        uint256 aliceBalanceBefore = initialTotalAssets - alice_collateral_vault.maxRelease();
+
+        // skim with no excess should be a noop
+        assertEq(initialTotalAssets, initialVaultBalance, "Should start with matching totals");
+
+        // Calling skim when there's no excess should not change anything
+        alice_collateral_vault.skim();
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), initialTotalAssets, "Skim with no excess should not change total");
+        vm.stopPrank();
+
+        // Someone airdrops tokens directly to the vault
+        address airdropper = makeAddr("airdropper");
+        dealEToken(collateralAssets, airdropper, 2 ether);
+
+        uint256 airdropAmount = IERC20(collateralAssets).balanceOf(airdropper);
+
+        // Bob transfers eTokens directly to the vault (simulating accidental transfer)
+        vm.startPrank(airdropper);
+        IERC20(collateralAssets).transfer(address(alice_collateral_vault), airdropAmount);
+        vm.stopPrank();
+
+        // Verify the vault now has extra tokens
+        uint256 vaultBalanceAfterTransfer = IERC20(collateralAssets).balanceOf(address(alice_collateral_vault));
+        assertEq(vaultBalanceAfterTransfer, initialVaultBalance + airdropAmount, "Vault should have extra tokens");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), initialTotalAssets, "totalAssets should not change yet");
+
+        // Test: Only borrower can call skim
+        vm.startPrank(airdropper);
+        vm.expectRevert(TwyneErrors.ReceiverNotBorrower.selector);
+        alice_collateral_vault.skim();
+        vm.stopPrank();
+
+        // Test: Borrower calls skim through EVC
+        vm.startPrank(alice);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.skim, ())
+        });
+
+        evc.batch(items);
+
+        uint256 finalTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint256 finalVaultBalance = IERC20(collateralAssets).balanceOf(address(alice_collateral_vault));
+        uint256 aliceBalanceAfter = finalTotalAssets - alice_collateral_vault.maxRelease();
+
+
+        assertEq(finalTotalAssets, finalVaultBalance, "After skim: totalAssets should match vault balance");
+        assertEq(alice_collateral_vault.maxRepay(), initialBorrow, "After skim: borrow amount shouldn't change");
+        assertEq(aliceBalanceAfter - aliceBalanceBefore, airdropAmount, "After skim: borrower's collateral should increase by airdrop amout");
+
+        vm.stopPrank();
+    }
 }

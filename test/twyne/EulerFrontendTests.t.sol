@@ -12,6 +12,7 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
+import {MockSwapper} from "test/mocks/MockSwapper.sol";
 
 contract EulerFrontendTests is EulerTestBase {
     function setUp() public override {
@@ -361,5 +362,75 @@ contract EulerFrontendTests is EulerTestBase {
         vm.stopPrank();
 
         console2.log(IEVault(eulerWETH).balanceOf(bob));
+    }
+
+    // Test 1-click leverage functionality
+    function test_e_1clickLeverage() public {
+        e_creditDeposit(eulerWETH);
+        MockSwapper mockSwapper = new MockSwapper();
+        uint eulerWETHBalance = IERC20(eulerWETH).balanceOf(alice);
+
+        // Create collateral vault for user
+        vm.startPrank(alice);
+        EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV
+            })
+        );
+
+        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
+
+        uint usdcBorrowAmount = 20000 * 1e6;
+        uint minAmountOutWETH = 1 ether;
+        uint deadline = block.timestamp + 10; // deadline of the swap quote
+        // Prepare batch items for 1-click leverage
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](5);
+
+        // Step 1: deposit eulerWETH as collateral
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.deposit, (eulerWETHBalance))
+        });
+
+        // Step 2: borrow USDC with Swapper as the receiver
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.borrow, (usdcBorrowAmount, address(mockSwapper)))
+        });
+
+        // Step 3: swap USDC for WETH. eulerWETH receives the swapped WETH (frontend needs to send swap quote to Swapper)
+        items[2] = IEVC.BatchItem({
+            targetContract: address(mockSwapper),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(MockSwapper.swap, (USDC, WETH, usdcBorrowAmount, minAmountOutWETH, eulerWETH))
+        });
+
+        // Step 4: skim the received WETH, deposit it in eulerWETH, transfer the receipt token to collateral vault
+        items[3] = IEVC.BatchItem({
+            targetContract: eulerSwapVerifier,
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeWithSignature("verifyAmountMinAndSkim(address,address,uint256,uint256)", eulerWETH, address(alice_collateral_vault), minAmountOutWETH, deadline)
+        });
+
+        // Step 5: skim collateral asset
+        items[4] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.skim, ())
+        });
+
+        evc.batch(items);
+
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), eulerWETHBalance);
+        assertEq(alice_collateral_vault.maxRepay(), usdcBorrowAmount);
     }
 }

@@ -360,6 +360,10 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         vm.expectRevert(TwyneErrors.ExternallyLiquidated.selector);
         alice_collateral_vault.redeemUnderlying(1, alice);
+
+        vm.expectRevert(TwyneErrors.ExternallyLiquidated.selector);
+        alice_collateral_vault.skim();
+
         vm.stopPrank();
 
         address newLiquidator = makeAddr("newLiquidator");

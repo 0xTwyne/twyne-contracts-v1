@@ -16,6 +16,7 @@ interface IEvents {
     event T_DepositUnderlying(uint amount);
     event T_Withdraw(uint amount, address indexed receiver);
     event T_RedeemUnderlying(uint amount, address indexed receiver);
+    event T_Skim(uint amount);
     event T_SetTwyneLiqLTV(uint ltv);
     event T_Rebalance();
     // EulerCollateralVault

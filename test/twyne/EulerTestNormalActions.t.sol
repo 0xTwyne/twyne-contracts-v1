@@ -361,4 +361,13 @@ contract EulerTestNormalActions is EulerTestBase {
     function testFuzz_e_depositETHToIntermediateVault(address collateralAssets) public noGasMetering {
         e_depositETHToIntermediateVault(collateralAssets);
     }
+
+    // Test skim function
+    function test_e_skim() public noGasMetering {
+        e_skim(eulerWETH);
+    }
+
+    function testFuzz_e_skim(address collateralAssets) public noGasMetering {
+        e_skim(collateralAssets);
+    }
 }

@@ -265,7 +265,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     /// @notice Deposits a certain amount of assets.
     /// @param assets The assets to deposit.
     function deposit(uint assets)
-        public
+        external
         onlyBorrowerAndNotExtLiquidated
         whenNotPaused
         nonReentrant
@@ -282,7 +282,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     /// @notice Deposits a certain amount of underlying asset.
     /// @param underlying The underlying assets to deposit.
     function depositUnderlying(uint underlying)
-        public
+        external
         onlyBorrowerAndNotExtLiquidated
         whenNotPaused
         nonReentrant
@@ -296,6 +296,22 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
 
     // _depositUnderlying() requires custom implementation per protocol integration
     function _depositUnderlying(uint underlying) internal virtual returns (uint assets);
+
+    /// @notice Deposits airdropped collateral asset.
+    /// @dev This is the last step in a 1-click leverage batch.
+    function skim() external callThroughEVC onlyEVCAccountOwner whenNotPaused nonReentrant {
+        // copied from onlyBorrowerAndNotExtLiquidated modifier to cache balanceOf
+        require(_msgSender() == borrower, ReceiverNotBorrower());
+        uint balance = IERC20(asset()).balanceOf(address(this));
+        uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
+        require(_totalAssetsDepositedOrReserved <= balance, ExternallyLiquidated());
+
+        createVaultSnapshot();
+        totalAssetsDepositedOrReserved = balance;
+        _handleExcessCredit(_invariantCollateralAmount());
+        evc.requireAccountAndVaultStatusCheck(address(this));
+        emit T_Skim(balance - _totalAssetsDepositedOrReserved);
+    }
 
     /// @notice Withdraws a certain amount of assets for a receiver.
     /// @param assets Amount of collateral assets to withdraw.

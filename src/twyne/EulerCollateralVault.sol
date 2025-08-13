@@ -116,11 +116,12 @@ contract EulerCollateralVault is CollateralVaultBase {
         // How: Check if within some margin (say, 2%) of this liquidation point
         // Note: This method ignores the internal borrow, because Euler does not consider it at all
 
+        address __asset = asset();
         // cache the debt owed to the targetVault
         (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
 
         // externalCollateralValueScaledByLiqLTV is actual collateral value * externalLiquidationLTV, so it's lower than the real value
-        if (externalBorrowDebtValue * MAXFACTOR > uint(twyneVaultManager.externalLiqBuffers(asset())) * externalCollateralValueScaledByLiqLTV) {
+        if (externalBorrowDebtValue * MAXFACTOR > uint(twyneVaultManager.externalLiqBuffers(__asset)) * externalCollateralValueScaledByLiqLTV) {
             // note to avoid divide by zero case, don't divide by externalCollateralValueScaledByLiqLTV
             return true;
         }
@@ -138,7 +139,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         // userOwnedCollateralAmount = vaultOwnedCollateralAmount - internalBorrowDebtAmount
         // userOwnedCollateralValue = userOwnedCollateralAmount converted to USD
         uint userCollateralValue = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
-            totalAssetsDepositedOrReserved - maxRelease(), asset(), IEVault(intermediateVault).unitOfAccount());
+            totalAssetsDepositedOrReserved - maxRelease(), __asset, IEVault(intermediateVault).unitOfAccount());
 
         // note to avoid divide by zero case, don't divide by borrowerOwnedCollateralValue
         return (externalBorrowDebtValue * MAXFACTOR > twyneLiqLTV * userCollateralValue);
@@ -166,7 +167,7 @@ contract EulerCollateralVault is CollateralVaultBase {
 
         if (_maxRepay > 0) {
             liquidatorReward = twyneVaultManager.oracleRouter().getQuote(
-                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(asset()),
+                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(__asset),
                 targetAsset,
                 IEVault(__asset).asset()
             );
@@ -238,6 +239,10 @@ contract EulerCollateralVault is CollateralVaultBase {
 
         totalAssetsDepositedOrReserved += toDeposit;
         _handleExcessCredit(_invariantCollateralAmount());
+
+        if (toBorrow == type(uint).max) {
+            toBorrow = IEVault(targetVault).debtOf(subAccount);
+        }
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
         items[0] = IEVC.BatchItem({

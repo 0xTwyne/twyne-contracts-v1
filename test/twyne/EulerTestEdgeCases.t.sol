@@ -315,6 +315,8 @@ contract EulerTestEdgeCases is EulerTestBase {
         alice_collateral_vault.depositUnderlying(INITIAL_DEALT_ERC20 / 2);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         alice_collateral_vault.deposit(INITIAL_DEALT_ERC20 / 4);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_collateral_vault.skim();
         // withdraw is blocked because of the automatic rebalancing on the intermediate vault, which is paused
         vm.expectRevert(Errors.E_OperationDisabled.selector);
         alice_collateral_vault.withdraw(1 ether, alice);
@@ -336,10 +338,13 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(eve);
         IERC20(eulerWETH).transfer(address(eeWETH_intermediate_vault), CREDIT_LP_AMOUNT);
         eeWETH_intermediate_vault.skim(CREDIT_LP_AMOUNT, eve);
+
+        IERC20(eulerWETH).transfer(address(alice_collateral_vault), 1 ether);
         vm.stopPrank();
 
-        // after unpause, collateral deposit should work
         vm.startPrank(alice);
+        alice_collateral_vault.skim();
+        // after unpause, collateral deposit should work
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
@@ -1321,6 +1326,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         uint borrowAmount = IEVault(eulerUSDC).debtOf(subAccount1);
 
         // Approve and teleport through batch
+        uint snapshot = vm.snapshotState();
         vm.startPrank(user);
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
         items[0] = IEVC.BatchItem({
@@ -1336,6 +1342,34 @@ contract EulerTestEdgeCases is EulerTestBase {
             onBehalfOfAccount: user,
             value: 0,
             data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, borrowAmount, subAccount1))
+        });
+
+        evc.batch(items);
+        vm.stopPrank();
+
+        // Verify the teleport was successful
+        assertEq(IEVault(eulerUSDC).debtOf(subAccount1), 0, "User debt should be 0 after teleport");
+        assertEq(IEVault(eulerWETH).balanceOf(subAccount1), 0, "User collateral should be 0 after teleport");
+        assertEq(IEVault(eulerUSDC).debtOf(address(teleporter_collateral_vault)), borrowAmount, "Vault should have the debt");
+        assertGt(teleporter_collateral_vault.totalAssetsDepositedOrReserved(), 0, "Vault should have assets");
+
+        vm.revertToState(snapshot);
+
+        vm.startPrank(user);
+        items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: eulerWETH,
+            onBehalfOfAccount: subAccount1,
+            value: 0,
+            data: abi.encodeCall(IERC20.approve, (address(teleporter_collateral_vault), collateralAmount))
+        });
+        eulerEVC.batch(items);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: address(teleporter_collateral_vault),
+            onBehalfOfAccount: user,
+            value: 0,
+            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, type(uint).max, subAccount1))
         });
 
         evc.batch(items);

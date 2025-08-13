@@ -76,6 +76,7 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     address WETH;
     address WSTETH;
     address USDS;
+    address eulerSwapVerifier;
     address constant USD = address(840);
     uint256 ethPrice;
     EulerRouter eulerOnChain;
@@ -101,6 +102,7 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             eulerOnChain = EulerRouter(0x83B3b76873D36A28440cF53371dF404c42497136);
             fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
             fixtureTargetAssets = [eulerUSDC, eulerUSDS];
+            eulerSwapVerifier = 0xae26485ACDDeFd486Fe9ad7C2b34169d360737c7;
         } else if (block.chainid == 8453) { // base
             forkBlock = 33455299;
             forkBlockDiff = block.number - forkBlock;
@@ -114,6 +116,7 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             eulerOnChain = EulerRouter(0x6E183458600e66047A0f4D356d9DAa480DA1CA59);
             fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
             fixtureTargetAssets = [eulerUSDC, eulerUSDS];
+            eulerSwapVerifier = 0x30660764A7a05B84608812C8AFC0Cb4845439EEe;
         // } else if (block.chainid == 146) {
         //     forkBlock = 19185510;
         //     forkBlockDiff = block.number - forkBlock;

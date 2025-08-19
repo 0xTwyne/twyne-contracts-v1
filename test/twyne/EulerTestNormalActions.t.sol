@@ -95,7 +95,7 @@ contract EulerTestNormalActions is EulerTestBase {
     }
 
     // fuzzing entry point for all assets
-    function testFuzz_e_creditWithdrawWithInterestAndNoFees(address collateralAssets, uint warpBlockAmount) public noGasMetering {
+    function testFuzz_e_creditWithdrawWithInterestAndNoFees(address /* collateralAssets */, uint warpBlockAmount) public noGasMetering {
         e_creditWithdrawWithInterestAndNoFees(eulerWETH, warpBlockAmount); // TODO
     }
 
@@ -103,7 +103,7 @@ contract EulerTestNormalActions is EulerTestBase {
         e_creditWithdrawWithInterestAndFees(eulerWETH);
     }
 
-    function testFuzz_e_creditWithdrawWithInterestAndFees(address collateralAssets) public noGasMetering {
+    function testFuzz_e_creditWithdrawWithInterestAndFees(address /* collateralAssets */) public noGasMetering {
         e_creditWithdrawWithInterestAndFees(eulerWETH); // TODO
     }
 
@@ -206,7 +206,7 @@ contract EulerTestNormalActions is EulerTestBase {
     }
 
     // fuzzing entry point for all assets and different warp periods
-    function testFuzz_e_maxBorrowFromEulerDirect(address collateralAssets, uint16 collateralMultiplier) public noGasMetering {
+    function testFuzz_e_maxBorrowFromEulerDirect(address /* collateralAssets */, uint16 collateralMultiplier) public noGasMetering {
         e_maxBorrowFromEulerDirect(eulerWETH, collateralMultiplier); // TODO
     }
 
@@ -267,7 +267,7 @@ contract EulerTestNormalActions is EulerTestBase {
         e_teleportEulerPosition(eulerWETH);
     }
 
-    function testFuzz_e_teleportEulerPosition(address collateralAssets) public noGasMetering {
+    function testFuzz_e_teleportEulerPosition(address /* collateralAssets */) public noGasMetering {
         e_teleportEulerPosition(eulerWETH); // TODO
     }
 

@@ -10,6 +10,7 @@ import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 import {SequenceRegistry} from "euler-vault-kit/SequenceRegistry/SequenceRegistry.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Initialize} from "euler-vault-kit/EVault/modules/Initialize.sol";
 import {Token} from "euler-vault-kit/EVault/modules/Token.sol";
 import {Vault} from "euler-vault-kit/EVault/modules/Vault.sol";
@@ -30,7 +31,9 @@ import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_SKIM, CFG_DONT_SOCIALIZE_DEBT}
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
+import {Address} from "openzeppelin-contracts/utils/Address.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
+import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 
 interface EulerRouterFactory {
     function deploy(address) external returns (address);
@@ -49,6 +52,9 @@ contract TwyneDeployEulerIntegration is Script {
     address WETH;
     address WSTETH;
     address permit2;
+    address eulerSwapper;
+    address eulerSwapVerifier;
+    address morpho;
 
     address eulerCollateralVaultImpl;
     EthereumVaultConnector evc;
@@ -74,6 +80,7 @@ contract TwyneDeployEulerIntegration is Script {
     IEVault eeWETH_intermediate_vault;
     EulerCollateralVault deployer_collateral_vault;
     HealthStatViewer healthViewer;
+    LeverageOperator leverageOperator;
 
     address deployer;
     address admin;
@@ -94,6 +101,7 @@ contract TwyneDeployEulerIntegration is Script {
         address intermediateVault;
         address deployerExampleCollateralVault;
         address healthStatViewer;
+        address leverageOperator;
     }
 
     function run() public {
@@ -102,16 +110,25 @@ contract TwyneDeployEulerIntegration is Script {
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
             eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
             eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
+            eulerSwapVerifier = 0xae26485ACDDeFd486Fe9ad7C2b34169d360737c7;
+            eulerSwapper = 0x2Bba09866b6F1025258542478C39720A09B728bF;
+            morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
         } else if (block.chainid == 8453) { // base
             eulerOnchainRouter = 0x6E183458600e66047A0f4D356d9DAa480DA1CA59;
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
             eulerWSTETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
-        } else if (block.chainid == 146) { // sonic
-            eulerOnchainRouter = 0x231811a9574dDE19e49f72F7c1cAC3085De6971a;
-            eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
-            eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
-            eulerWSTETH = 0x05d57366B862022F76Fe93316e81E9f24218bBfC;
+            eulerSwapVerifier = 0x30660764A7a05B84608812C8AFC0Cb4845439EEe;
+            eulerSwapper = 0x0D3d0F97eD816Ca3350D627AD8e57B6AD41774df;
+            morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+        // } else if (block.chainid == 146) { // sonic
+        //     eulerOnchainRouter = 0x231811a9574dDE19e49f72F7c1cAC3085De6971a;
+        //     eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
+        //     eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
+        //     eulerWSTETH = 0x05d57366B862022F76Fe93316e81E9f24218bBfC;
+        //     eulerSwapper = address(0); // TODO: Add Sonic swapper address
+        //     eulerSwapVerifier = address(0); // TODO: Add Sonic swap verifier address
+        //     morpho = address(0); // TODO: Add Sonic morpho address
         } else {
             revert UnknownProfile();
         }
@@ -171,6 +188,7 @@ contract TwyneDeployEulerIntegration is Script {
         result = vm.serializeAddress("twyneAddresses", "intermediateVault", Addresses.intermediateVault);
         result = vm.serializeAddress("twyneAddresses", "deployerExampleCollateralVault", Addresses.deployerExampleCollateralVault);
         result = vm.serializeAddress("twyneAddresses", "healthStatViewer", Addresses.healthStatViewer);
+        result = vm.serializeAddress("twyneAddresses", "leverageOperator", Addresses.leverageOperator);
     }
 
     function newIntermediateVault(address _asset, address _oracle, address _unitOfAccount) internal returns (IEVault) {
@@ -280,14 +298,44 @@ contract TwyneDeployEulerIntegration is Script {
         vm.startBroadcast(deployerKey);
 
         // Deploy general Twyne contracts
-        collateralVaultFactory = new CollateralVaultFactory(deployer, address(evc));
+        
+        // Deploy CollateralVaultFactory implementation
+        CollateralVaultFactory factoryImpl = new CollateralVaultFactory(address(evc));
+        
+        // Create initialization data for CollateralVaultFactory
+        bytes memory factoryInitData = abi.encodeCall(CollateralVaultFactory.initialize, (deployer));
+        
+        // Deploy CollateralVaultFactory proxy
+        ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), factoryInitData);
+        collateralVaultFactory = CollateralVaultFactory(payable(address(factoryProxy)));
+        
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
-        vaultManager = new VaultManager(deployer, address(collateralVaultFactory));
+
+        // Deploy VaultManager implementation
+        VaultManager vaultManagerImpl = new VaultManager();
+
+        // Create initialization data for VaultManager
+        bytes memory vaultManagerInitData = abi.encodeCall(VaultManager.initialize, (deployer, address(collateralVaultFactory)));
+
+        // Deploy VaultManager proxy
+        ERC1967Proxy vaultManagerProxy = new ERC1967Proxy(address(vaultManagerImpl), vaultManagerInitData);
+        vaultManager = VaultManager(payable(address(vaultManagerProxy)));
+
         vm.label(address(vaultManager), "vaultManager");
 
         eulerCollateralVaultImpl = address(new EulerCollateralVault(address(evc), eulerUSDC));
 
         healthViewer = new HealthStatViewer();
+
+        // Deploy LeverageOperator
+        leverageOperator = new LeverageOperator(
+            address(evc),
+            eulerSwapper,
+            eulerSwapVerifier,
+            morpho,
+            address(collateralVaultFactory)
+        );
+        vm.label(address(leverageOperator), "leverageOperator");
 
         // Change ownership of EVK deploy contracts
         oracleRouter.transferGovernance(address(vaultManager));
@@ -331,7 +379,7 @@ contract TwyneDeployEulerIntegration is Script {
         );
         vm.stopBroadcast();
 
-        // Log to console the 7 variables to be saved in TwyneAddresses output file
+        // Log to console the variables to be saved in TwyneAddresses output file
         log("collateralVaultFactory", address(collateralVaultFactory));
         log("vaultManager", address(vaultManager));
         log("Twyne EulerRouter_oracle", address(oracleRouter));
@@ -339,8 +387,9 @@ contract TwyneDeployEulerIntegration is Script {
         log("eeWETH_intermediate_vault", address(eeWETH_intermediate_vault));
         log("deployer_collateral_vault", address(deployer_collateral_vault));
         log("healthViewer", address(healthViewer));
+        log("leverageOperator", address(leverageOperator));
 
-        // Store the 7 variables to be saved in TwyneAddresses output file
+        // Store the variables to be saved in TwyneAddresses output file
         TwyneAddresses memory twyneAddresses;
         twyneAddresses.collateralVaultFactory = address(collateralVaultFactory);
         twyneAddresses.vaultManager = address(vaultManager);
@@ -349,6 +398,7 @@ contract TwyneDeployEulerIntegration is Script {
         twyneAddresses.intermediateVault = address(eeWETH_intermediate_vault);
         twyneAddresses.deployerExampleCollateralVault = address(deployer_collateral_vault);
         twyneAddresses.healthStatViewer = address(healthViewer);
+        twyneAddresses.leverageOperator = address(leverageOperator);
         string memory serializedTwyneAddresses = serializeTwyneAddresses(twyneAddresses);
 
         vm.writeJson(serializedTwyneAddresses, "./TwyneAddresses_output.json");

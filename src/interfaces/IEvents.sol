@@ -35,4 +35,6 @@ interface IEvents {
     event T_SetLTV(address indexed intermediateVault, address indexed collateralVault, uint16 borrowLimit, uint16 liquidationLimit, uint32 rampDuration);
     event T_SetOracleResolvedVault(address indexed collateralAddress, bool allow);
     event T_DoCall(address indexed to, uint value, bytes data);
+    // LeverageOperator
+    event T_LeverageUpExecuted(address indexed collateralVault);
 }

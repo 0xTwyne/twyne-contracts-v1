@@ -29,4 +29,10 @@ interface IErrors {
     error ValueOutOfRange(); // 0x4eb4f9fb
     error VaultStatusLiquidatable(); // 0x9c166fd0
     error ViolatorNotCollateralVault(); // 0x6af6f6bb
+
+    // LeverageOperator errors
+    error T_CallerNotBorrower();
+    error T_CallerNotMorpho();
+    error T_FlashloanNotActive();
+    error T_InvalidCollateralVault();
 }

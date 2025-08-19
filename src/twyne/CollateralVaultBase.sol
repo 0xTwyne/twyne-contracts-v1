@@ -46,7 +46,6 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
 
     modifier onlyBorrowerAndNotExtLiquidated() {
         _callThroughEVC();
-        _onlyEVCAccountOwner();
         require(_msgSender() == borrower, ReceiverNotBorrower());
         require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
         _;
@@ -299,7 +298,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
 
     /// @notice Deposits airdropped collateral asset.
     /// @dev This is the last step in a 1-click leverage batch.
-    function skim() external callThroughEVC onlyEVCAccountOwner whenNotPaused nonReentrant {
+    function skim() external callThroughEVC whenNotPaused nonReentrant {
         // copied from onlyBorrowerAndNotExtLiquidated modifier to cache balanceOf
         require(_msgSender() == borrower, ReceiverNotBorrower());
         uint balance = IERC20(asset()).balanceOf(address(this));

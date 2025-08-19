@@ -17,6 +17,7 @@ import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
 import {MockCollateralVault} from "test/mocks/MockCollateralVault.sol";
@@ -27,6 +28,7 @@ import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConn
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
+import {MockSwapper} from "test/mocks/MockSwapper.sol";
 
 contract NewImplementation {
     uint constant public version = 953;
@@ -109,7 +111,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     // Edge case where a batch attempts to force a Twyne liquidation
     // This should not be possible
-    function test_e_verifyBatchCannotForceLiquidation() public noGasMetering {
+    function test_e_operatorCanForceLiquidation() public noGasMetering {
         // This test won't work for liq buffer of 1 since the collateral vault becomes liquidatable
         // on Twyne and Euler at the same time. Thus, the batch executed later will be reverted by
         // Euler for items[0].
@@ -143,7 +145,7 @@ contract EulerTestEdgeCases is EulerTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (withdrawAmountTriggerLiquidation, liquidator))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (withdrawAmountTriggerLiquidation * 11/10, liquidator))
         });
         items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
@@ -157,7 +159,6 @@ contract EulerTestEdgeCases is EulerTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.deposit, (withdrawAmountTriggerLiquidation))
         });
-        vm.expectRevert(EVCUtil.NotAuthorized.selector);
         evc.batch(items);
         vm.stopPrank();
     }
@@ -553,7 +554,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         assertEq(twyneVaultManager.collateralVaultFactory(), address(collateralVaultFactory), "collateral vault factory incorrectly set before update");
         vm.startPrank(admin);
-        CollateralVaultFactory newCollateralVaultFactory = new CollateralVaultFactory(admin, address(evc));
+        CollateralVaultFactory newCollateralVaultFactory = new CollateralVaultFactory(address(evc));
         twyneVaultManager.setCollateralVaultFactory(address(newCollateralVaultFactory));
         assertEq(twyneVaultManager.collateralVaultFactory(), address(newCollateralVaultFactory), "collateral vault factory incorrectly set after update");
         vm.stopPrank();
@@ -644,9 +645,29 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         vm.startPrank(admin);
         // Deploy general Twyne contracts
-        collateralVaultFactory = new CollateralVaultFactory(admin, address(evc));
+        
+        // Deploy CollateralVaultFactory implementation
+        CollateralVaultFactory factoryImpl = new CollateralVaultFactory(address(evc));
+        
+        // Create initialization data for CollateralVaultFactory
+        bytes memory factoryInitData = abi.encodeCall(CollateralVaultFactory.initialize, (admin));
+        
+        // Deploy CollateralVaultFactory proxy
+        ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), factoryInitData);
+        collateralVaultFactory = CollateralVaultFactory(payable(address(factoryProxy)));
+        
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
-        twyneVaultManager = new VaultManager(admin, address(collateralVaultFactory));
+
+        // Deploy VaultManager implementation
+        VaultManager vaultManagerImpl = new VaultManager();
+
+        // Create initialization data for VaultManager
+        bytes memory vaultManagerInitData = abi.encodeCall(VaultManager.initialize, (admin, address(collateralVaultFactory)));
+
+        // Deploy VaultManager proxy
+        ERC1967Proxy vaultManagerProxy = new ERC1967Proxy(address(vaultManagerImpl), vaultManagerInitData);
+        twyneVaultManager = VaultManager(payable(address(vaultManagerProxy)));
+
         vm.label(address(twyneVaultManager), "twyneVaultManager");
         oracleRouter = new EulerRouter(address(evc), address(twyneVaultManager));
         vm.label(address(oracleRouter), "oracleRouter");
@@ -736,7 +757,6 @@ contract EulerTestEdgeCases is EulerTestBase {
             value: 0,
             data: abi.encodeCall(alice_collateral_vault.setTwyneLiqLTV, newLTV)
         });
-        vm.expectRevert(EVCUtil.NotAuthorized.selector);
         evc.batch(items);
         vm.stopPrank();
 
@@ -1382,4 +1402,95 @@ contract EulerTestEdgeCases is EulerTestBase {
         assertGt(teleporter_collateral_vault.totalAssetsDepositedOrReserved(), 0, "Vault should have assets");
     }
 
+    function test_e_LeverageOperator() public noGasMetering {
+        e_creditDeposit(eulerWETH);
+        MockSwapper mockSwapper = new MockSwapper();
+        vm.etch(eulerSwapper, address(mockSwapper).code);
+
+        vm.startPrank(bob);
+        EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV
+            })
+        );
+
+        evc.setAccountOperator(bob, address(leverageOperator), true);
+        // Approve leverage operator to take user's collateral
+        IERC20(eulerWETH).approve(address(leverageOperator), type(uint).max);
+        IERC20(WETH).approve(address(leverageOperator), type(uint).max);
+        vm.stopPrank();
+
+        // Create collateral vault for user
+        vm.startPrank(alice);
+        EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV
+            })
+        );
+
+        // Approve leverage operator to take user's collateral
+        IERC20(eulerWETH).approve(address(leverageOperator), type(uint).max);
+        IERC20(WETH).approve(address(leverageOperator), type(uint).max);
+
+        uint userUnderlyingCollateralAmount = 1 ether; // User provides 1 WETH
+        uint userCollateralAmount = 1 ether; // User provides 1 eulerWETH
+        uint flashloanAmount = 20000 * 1e6; // Flashloan 20,000 USDC
+        uint minAmountOutWETH = 20 ether; // Expect at least 20 WETH from swap
+        uint deadline = block.timestamp + 10; // deadline of the swap quote
+
+        // Prepare swap data for the swapper
+        deal(WETH, eulerSwapper, minAmountOutWETH + 10);
+        bytes memory swapData = abi.encodeCall(MockSwapper.swap, (USDC, WETH, flashloanAmount, minAmountOutWETH, eulerWETH));
+        bytes[] memory multicallData = new bytes[](1);
+        multicallData[0] = swapData;
+
+        vm.expectRevert(TwyneErrors.T_CallerNotBorrower.selector);
+        leverageOperator.executeLeverage(
+            address(bob_collateral_vault),
+            userUnderlyingCollateralAmount,
+            userCollateralAmount,
+            flashloanAmount,
+            minAmountOutWETH,
+            deadline,
+            multicallData
+        );
+
+        vm.expectRevert(EVCErrors.EVC_NotAuthorized.selector);
+        leverageOperator.executeLeverage(
+            address(alice_collateral_vault),
+            userUnderlyingCollateralAmount,
+            userCollateralAmount,
+            flashloanAmount,
+            minAmountOutWETH,
+            deadline,
+            multicallData
+        );
+
+        evc.setAccountOperator(alice, address(leverageOperator), true);
+        // Execute leverage through the operator
+        leverageOperator.executeLeverage(
+            address(alice_collateral_vault),
+            userUnderlyingCollateralAmount,
+            userCollateralAmount,
+            flashloanAmount,
+            minAmountOutWETH,
+            deadline,
+            multicallData
+        );
+
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), userCollateralAmount + userUnderlyingCollateralAmount);
+        assertEq(alice_collateral_vault.maxRepay(), flashloanAmount);
+
+        // Verify that LeverageOperator has no remaining token balances
+        assertEq(IERC20(eulerWETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerWETH");
+        assertEq(IERC20(eulerUSDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerUSDC");
+        assertEq(IERC20(WETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 WETH");
+        assertEq(IERC20(USDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 USDC");
+
+
+    }
 }

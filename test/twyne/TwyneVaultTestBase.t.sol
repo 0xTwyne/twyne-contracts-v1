@@ -5,6 +5,8 @@ import {Test, console2} from "forge-std/Test.sol";
 
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 
 import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 import {ProtocolConfig} from "euler-vault-kit/ProtocolConfig/ProtocolConfig.sol";
@@ -37,7 +39,6 @@ import {AssertionsCustomTypes} from "euler-vault-kit/../test/helpers/AssertionsC
 
 import "euler-vault-kit/EVault/shared/Constants.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
-import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 
 contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     EthereumVaultConnector public evc;
@@ -77,6 +78,8 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
     address WSTETH;
     address USDS;
     address eulerSwapVerifier;
+    address eulerSwapper;
+    address morpho;
     address constant USD = address(840);
     uint256 ethPrice;
     EulerRouter eulerOnChain;
@@ -103,6 +106,8 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
             fixtureTargetAssets = [eulerUSDC, eulerUSDS];
             eulerSwapVerifier = 0xae26485ACDDeFd486Fe9ad7C2b34169d360737c7;
+            eulerSwapper = 0x2Bba09866b6F1025258542478C39720A09B728bF;
+            morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
         } else if (block.chainid == 8453) { // base
             forkBlock = 33455299;
             forkBlockDiff = block.number - forkBlock;
@@ -117,6 +122,8 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
             fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
             fixtureTargetAssets = [eulerUSDC, eulerUSDS];
             eulerSwapVerifier = 0x30660764A7a05B84608812C8AFC0Cb4845439EEe;
+            eulerSwapper = 0x0D3d0F97eD816Ca3350D627AD8e57B6AD41774df;
+            morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
         // } else if (block.chainid == 146) {
         //     forkBlock = 19185510;
         //     forkBlockDiff = block.number - forkBlock;
@@ -149,7 +156,16 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
         protocolFeeReceiver = makeAddr("protocolFeeReceiver");
         evc = new EthereumVaultConnector();
         factory = new GenericFactory(admin);
-        collateralVaultFactory = new CollateralVaultFactory(admin, address(evc));
+        
+        // Deploy CollateralVaultFactory implementation
+        CollateralVaultFactory factoryImpl = new CollateralVaultFactory(address(evc));
+        
+        // Create initialization data for CollateralVaultFactory
+        bytes memory initData = abi.encodeCall(CollateralVaultFactory.initialize, (admin));
+        
+        // Deploy CollateralVaultFactory proxy
+        ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), initData);
+        collateralVaultFactory = CollateralVaultFactory(payable(address(factoryProxy)));
 
         protocolConfig = new ProtocolConfig(admin, protocolFeeReceiver);
         balanceTracker = address(new MockBalanceTracker());

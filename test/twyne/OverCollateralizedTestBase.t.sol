@@ -8,11 +8,13 @@ import {ChainlinkOracle} from "euler-price-oracle/src/adapter/chainlink/Chainlin
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
+import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {MockPriceOracle} from "euler-vault-kit/../test/mocks/MockPriceOracle.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
+import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
@@ -47,6 +49,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
     IEVault eeWETH_intermediate_vault;
     IEVault eeWSTETH_intermediate_vault;
     EulerWrapper eulerWrapper;
+    LeverageOperator leverageOperator;
 
     uint16 maxLTVInitial;
     uint16 externalLiqBufferInitial;
@@ -164,11 +167,34 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         // Create vault manager and configure
         vm.startPrank(admin);
 
-        twyneVaultManager = new VaultManager(admin, address(collateralVaultFactory));
+        // Deploy VaultManager implementation
+        VaultManager vaultManagerImpl = new VaultManager();
+
+        // Create initialization data for VaultManager
+        bytes memory initData = abi.encodeCall(VaultManager.initialize, (admin, address(collateralVaultFactory)));
+
+        // Deploy VaultManager proxy
+        ERC1967Proxy vaultManagerProxy = new ERC1967Proxy(address(vaultManagerImpl), initData);
+        twyneVaultManager = VaultManager(payable(address(vaultManagerProxy)));
 
         healthViewer = new HealthStatViewer();
 
         eulerWrapper = new EulerWrapper(address(evc), IEVault(eulerWETH).asset());
+
+        // Deploy LeverageOperator
+        leverageOperator = new LeverageOperator(
+            address(evc),
+            eulerSwapper,
+            eulerSwapVerifier,
+            morpho,
+            address(collateralVaultFactory)
+        );
+
+        // Add labels for new addresses
+        vm.label(address(leverageOperator), "leverageOperator");
+        vm.label(eulerSwapper, "eulerSwapper");
+        vm.label(eulerSwapVerifier, "eulerSwapVerifier");
+        vm.label(morpho, "morpho");
 
         // Set BORROW_USD_AMOUNT dynamically
         uint256 externalEulerLTV = IEVault(eulerUSDC).LTVBorrow(eulerWETH);

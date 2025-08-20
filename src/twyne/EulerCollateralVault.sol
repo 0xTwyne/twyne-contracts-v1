@@ -234,11 +234,13 @@ contract EulerCollateralVault is CollateralVaultBase {
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault
-    function teleport(uint toDeposit, uint toBorrow, address subAccount) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
+    function teleport(uint toDeposit, uint toBorrow, uint8 subAccountId) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
 
         totalAssetsDepositedOrReserved += toDeposit;
         _handleExcessCredit(_invariantCollateralAmount());
+
+        address subAccount = address(uint160(uint160(borrower) ^ subAccountId));
 
         if (toBorrow == type(uint).max) {
             toBorrow = IEVault(targetVault).debtOf(subAccount);

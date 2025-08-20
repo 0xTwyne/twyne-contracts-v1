@@ -218,7 +218,7 @@ contract TwyneUpgradeTests is Test {
             targetContract: address(teleporter_collateral_vault),
             onBehalfOfAccount: user,
             value: 0,
-            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, borrowAmount, subAccount1))
+            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, borrowAmount, 1))
         });
 
         evc.batch(items);

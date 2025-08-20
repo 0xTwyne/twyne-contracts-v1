@@ -1096,7 +1096,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
         IEVault(collateralAssets).approve(address(teleporter_collateral_vault), C);
         uint C_LP = getReservedAssets(C, teleporter_collateral_vault);
-        teleporter_collateral_vault.teleport(C, B, teleporter);
+        teleporter_collateral_vault.teleport(C, B, 0);
         vm.stopPrank();
 
         assertEq(IEVault(eulerUSDC).debtOf(teleporter), 0, "user debt not correct after teleport");
@@ -1128,7 +1128,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
         C_LP = getReservedAssets(C, teleporter_collateral_vault);
         assertEq(C_LP, 0, "C_LP should be 0 when liqLTV_twyne == effective_liqLTV_euler");
 
-        teleporter_collateral_vault.teleport(C, B, teleporter);
+        teleporter_collateral_vault.teleport(C, B, 0);
         vm.stopPrank();
 
         assertEq(IEVault(eulerUSDC).debtOf(teleporter), 0, "C_LP should be 0 when liqLTV_twyne == effective_liqLTV_euler");

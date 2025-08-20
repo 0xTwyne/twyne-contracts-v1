@@ -645,17 +645,17 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         vm.startPrank(admin);
         // Deploy general Twyne contracts
-        
+
         // Deploy CollateralVaultFactory implementation
         CollateralVaultFactory factoryImpl = new CollateralVaultFactory(address(evc));
-        
+
         // Create initialization data for CollateralVaultFactory
         bytes memory factoryInitData = abi.encodeCall(CollateralVaultFactory.initialize, (admin));
-        
+
         // Deploy CollateralVaultFactory proxy
         ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), factoryInitData);
         collateralVaultFactory = CollateralVaultFactory(payable(address(factoryProxy)));
-        
+
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
 
         // Deploy VaultManager implementation
@@ -849,7 +849,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Intermediate vault reverts during account status check,
         // since it doesn't allow borrowing against 0 collateral.
         vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        teleporter_collateral_vault.teleport(0, B, teleporter);
+        teleporter_collateral_vault.teleport(0, B, 0);
         vm.stopPrank();
     }
 
@@ -1361,7 +1361,7 @@ contract EulerTestEdgeCases is EulerTestBase {
             targetContract: address(teleporter_collateral_vault),
             onBehalfOfAccount: user,
             value: 0,
-            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, borrowAmount, subAccount1))
+            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, borrowAmount, 1))
         });
 
         evc.batch(items);
@@ -1389,7 +1389,7 @@ contract EulerTestEdgeCases is EulerTestBase {
             targetContract: address(teleporter_collateral_vault),
             onBehalfOfAccount: user,
             value: 0,
-            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, type(uint).max, subAccount1))
+            data: abi.encodeCall(EulerCollateralVault.teleport, (collateralAmount, type(uint).max, 1))
         });
 
         evc.batch(items);

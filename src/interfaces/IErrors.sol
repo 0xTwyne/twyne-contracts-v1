@@ -33,6 +33,5 @@ interface IErrors {
     // LeverageOperator errors
     error T_CallerNotBorrower();
     error T_CallerNotMorpho();
-    error T_FlashloanNotActive();
     error T_InvalidCollateralVault();
 }

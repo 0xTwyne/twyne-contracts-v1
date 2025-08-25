@@ -218,7 +218,7 @@ contract PostDeploymentCheck is Script {
         require(hookedOps & OP_BORROW != 0, "Borrow hook not set");
         require(hookedOps & OP_LIQUIDATE != 0, "Liquidate hook not set");
         require(hookedOps & OP_FLASHLOAN != 0, "Flashloan hook not set");
-        require(hookedOps & OP_SKIM != 0, "Skim hook not set");
+        require(hookedOps & OP_SKIM == 0, "Skim hook set");
 
         // Check interest rate model is set
         require(intermediateVault.interestRateModel() != address(0), "Interest rate model not set");

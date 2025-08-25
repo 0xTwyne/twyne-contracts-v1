@@ -35,10 +35,6 @@ contract LeverageOperator is IErrors, IEvents {
     IMorpho public immutable MORPHO;
     CollateralVaultFactory public immutable COLLATERAL_VAULT_FACTORY;
 
-    // Transient storage for flashloan state
-    bool private transient flashloanLock;
-    uint private transient initialCollateralBalance;
-
     /// @notice Constructor to initialize the operator with required addresses
     /// @param _evc Address of the Ethereum Vault Connector
     /// @param _swapper Address of the swapper contract for token swaps
@@ -98,21 +94,17 @@ contract LeverageOperator is IErrors, IEvents {
         address collateral = vault.asset();
         address targetAsset = vault.targetAsset();
 
-        initialCollateralBalance = IERC20(collateral).balanceOf(address(this));
 
         {
             if (underlyingCollateralAmount > 0) {
                 address underlyingCollateral = IEVault(collateral).asset();
-                IERC20(underlyingCollateral).safeTransferFrom(msg.sender, address(this), underlyingCollateralAmount);
-                IERC20(underlyingCollateral).forceApprove(collateral, underlyingCollateralAmount);
-                IEVault(collateral).deposit(underlyingCollateralAmount, collateralVault);
+                IERC20(underlyingCollateral).safeTransferFrom(msg.sender, collateral, underlyingCollateralAmount);
+                IEVault(collateral).skim(underlyingCollateralAmount, collateralVault);
             }
             if (collateralAmount > 0) {
                 IEVault(collateral).transferFrom(msg.sender, collateralVault, collateralAmount);
             }
         }
-
-        flashloanLock = true;
 
         MORPHO.flashLoan(
             targetAsset,
@@ -128,9 +120,6 @@ contract LeverageOperator is IErrors, IEvents {
             )
         );
 
-        flashloanLock = false;
-        delete initialCollateralBalance;
-
         emit T_LeverageUpExecuted(collateralVault);
     }
 
@@ -139,8 +128,6 @@ contract LeverageOperator is IErrors, IEvents {
     /// @param data Encoded data containing swap and deposit parameters
     function onMorphoFlashLoan(uint amount, bytes calldata data) external {
         require(msg.sender == address(MORPHO), T_CallerNotMorpho());
-
-        require(flashloanLock, T_FlashloanNotActive());
 
         (
             address user,
@@ -153,7 +140,7 @@ contract LeverageOperator is IErrors, IEvents {
         ) = abi.decode(data, (address, address, address, address, uint, uint, bytes[]));
 
         // Step 1: Transfer flashloaned target asset to swapper
-        IERC20(targetAsset).transfer(SWAPPER, amount);
+        IERC20(targetAsset).safeTransfer(SWAPPER, amount);
 
         // Step 2: Execute swap target asset -> underlying collateral through multicall.
         // Euler vault receives the underlying collateral.
@@ -169,7 +156,6 @@ contract LeverageOperator is IErrors, IEvents {
             deadline
         );
 
-        // Create batch items for EVC
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
 
         // Deposit all airdropped collateral to collateral vault
@@ -188,11 +174,10 @@ contract LeverageOperator is IErrors, IEvents {
             data: abi.encodeCall(CollateralVaultBase.borrow, (amount, address(this)))
         });
 
-        // Execute batch through EVC
         IEVC(EVC).batch(items);
 
         // Step 6: Approve Morpho to take repayment
-        IERC20(targetAsset).approve(address(MORPHO), amount);
+        IERC20(targetAsset).forceApprove(address(MORPHO), amount);
 
         // Morpho will automatically pull the repayment amount
     }

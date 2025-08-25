@@ -11,7 +11,7 @@ import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
-import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_SKIM, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
+import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -196,7 +196,7 @@ contract TwyneAddVaultPair is BatchScript {
         console2.log("New intermediate vault", address(new_vault));
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
-        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_SKIM);
+        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
         // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
             idealKinkInterestRate_: 600, // 6%

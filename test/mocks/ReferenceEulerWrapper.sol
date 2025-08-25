@@ -13,8 +13,8 @@ interface IWETH {
     function deposit() external payable;
 }
 
-/// @title EulerWrapper
-contract EulerWrapper is EVCUtil, IErrors {
+/// @title ReferenceEulerWrapper - Old implementation for comparison
+contract ReferenceEulerWrapper is EVCUtil, IErrors {
     using SafeERC20 for IERC20;
 
     address internal constant permit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
@@ -31,16 +31,27 @@ contract EulerWrapper is EVCUtil, IErrors {
     /// @return sharesReceived The amount of shares received from the intermediate vault
     function depositUnderlyingToIntermediateVault(
         IEVault intermediateVault,
-        uint amount
-    ) external returns (uint sharesReceived) {
+        uint256 amount
+    ) external callThroughEVC returns (uint256 sharesReceived) {
         address msgSender = _msgSender();
 
         IEVault eulerVault = IEVault(intermediateVault.asset());
         address underlyingToken = eulerVault.asset();
 
-        SafeERC20Lib.safeTransferFrom(IERC20_Euler(underlyingToken), msgSender, address(eulerVault), amount, permit2);
-        uint eulerShares = eulerVault.skim(amount, address(intermediateVault));
-        sharesReceived = intermediateVault.skim(eulerShares, msgSender);
+        // Transfer underlying token from caller to this contract
+        SafeERC20Lib.safeTransferFrom(IERC20_Euler(underlyingToken), msgSender, address(this), amount, permit2);
+
+        // Approve Euler vault to spend underlying token
+        IERC20(underlyingToken).forceApprove(address(eulerVault), amount);
+
+        // Deposit underlying token into Euler vault and receive Euler vault shares
+        uint256 eulerShares = eulerVault.deposit(amount, address(this));
+
+        // Approve intermediate vault to spend Euler vault shares
+        IERC20(address(eulerVault)).approve(address(intermediateVault), eulerShares);
+
+        // Deposit Euler vault shares into intermediate vault
+        sharesReceived = intermediateVault.deposit(eulerShares, msgSender);
     }
 
     /// @notice Deposits ETH into Euler vault (wrapping to WETH first), then deposits the resulting shares into intermediate vault
@@ -48,9 +59,9 @@ contract EulerWrapper is EVCUtil, IErrors {
     /// @return sharesReceived The amount of shares received from the intermediate vault
     function depositETHToIntermediateVault(
         IEVault intermediateVault
-    ) external payable returns (uint sharesReceived) {
+    ) external payable callThroughEVC returns (uint256 sharesReceived) {
         address msgSender = _msgSender();
-        uint ethAmount = msg.value;
+        uint256 ethAmount = msg.value;
 
         IEVault eulerVault = IEVault(intermediateVault.asset());
         address underlyingToken = eulerVault.asset();
@@ -58,9 +69,10 @@ contract EulerWrapper is EVCUtil, IErrors {
         require(underlyingToken == WETH, OnlyWETH());
         IWETH(WETH).deposit{value: ethAmount}();
 
-        IERC20(WETH).transfer(address(eulerVault), ethAmount);
+        IERC20(WETH).approve(address(eulerVault), ethAmount);
 
-        uint eulerShares = eulerVault.skim(ethAmount, address(intermediateVault));
-        sharesReceived = intermediateVault.skim(eulerShares, msgSender);
+        uint256 eulerShares = eulerVault.deposit(ethAmount, address(this));
+        IERC20(address(eulerVault)).approve(address(intermediateVault), eulerShares);
+        sharesReceived = intermediateVault.deposit(eulerShares, msgSender);
     }
 }

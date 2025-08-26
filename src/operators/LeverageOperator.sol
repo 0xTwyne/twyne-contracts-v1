@@ -9,6 +9,7 @@ import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
 import {IEvents} from "src/interfaces/IEvents.sol";
+import {ReentrancyGuardTransient} from "openzeppelin-contracts/utils/ReentrancyGuardTransient.sol";
 
 interface IMorpho {
     function flashLoan(address token, uint assets, bytes calldata data) external;
@@ -25,7 +26,7 @@ interface ISwapVerifier {
 /// @title LeverageOperator
 /// @notice Operator contract for executing 1-click leverage operations on collateral vaults
 /// @dev Uses Morpho flashloans to enable atomic leverage operations
-contract LeverageOperator is IErrors, IEvents {
+contract LeverageOperator is ReentrancyGuardTransient, IErrors, IEvents {
     using SafeERC20 for IERC20;
 
     // Immutable addresses
@@ -85,7 +86,7 @@ contract LeverageOperator is IErrors, IEvents {
         uint minAmountOut,
         uint deadline,
         bytes[] calldata swapData
-    ) external {
+    ) external nonReentrant {
         require(COLLATERAL_VAULT_FACTORY.isCollateralVault(collateralVault), T_InvalidCollateralVault());
 
         EulerCollateralVault vault = EulerCollateralVault(collateralVault);

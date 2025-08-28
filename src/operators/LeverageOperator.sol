@@ -10,6 +10,7 @@ import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.so
 import {IErrors} from "src/interfaces/IErrors.sol";
 import {IEvents} from "src/interfaces/IEvents.sol";
 import {ReentrancyGuardTransient} from "openzeppelin-contracts/utils/ReentrancyGuardTransient.sol";
+import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
 
 interface IMorpho {
     function flashLoan(address token, uint assets, bytes calldata data) external;
@@ -26,30 +27,21 @@ interface ISwapVerifier {
 /// @title LeverageOperator
 /// @notice Operator contract for executing 1-click leverage operations on collateral vaults
 /// @dev Uses Morpho flashloans to enable atomic leverage operations
-contract LeverageOperator is ReentrancyGuardTransient, IErrors, IEvents {
+contract LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEvents {
     using SafeERC20 for IERC20;
 
-    // Immutable addresses
-    address public immutable EVC;
     address public immutable SWAPPER;
     address public immutable SWAP_VERIFIER;
     IMorpho public immutable MORPHO;
     CollateralVaultFactory public immutable COLLATERAL_VAULT_FACTORY;
 
-    /// @notice Constructor to initialize the operator with required addresses
-    /// @param _evc Address of the Ethereum Vault Connector
-    /// @param _swapper Address of the swapper contract for token swaps
-    /// @param _swapVerifier Address of the swap verifier contract
-    /// @param _morpho Address of the Morpho protocol for flashloans
-    /// @param _collateralVaultFactory Address of the CollateralVaultFactory
     constructor(
         address _evc,
         address _swapper,
         address _swapVerifier,
         address _morpho,
         address _collateralVaultFactory
-    ) {
-        EVC = _evc;
+    ) EVCUtil(_evc) {
         SWAPPER = _swapper;
         SWAP_VERIFIER = _swapVerifier;
         MORPHO = IMorpho(_morpho);
@@ -87,23 +79,23 @@ contract LeverageOperator is ReentrancyGuardTransient, IErrors, IEvents {
         uint deadline,
         bytes[] calldata swapData
     ) external nonReentrant {
+        address msgSender = _msgSender();
+
         require(COLLATERAL_VAULT_FACTORY.isCollateralVault(collateralVault), T_InvalidCollateralVault());
 
-        EulerCollateralVault vault = EulerCollateralVault(collateralVault);
-        require(vault.borrower() == msg.sender, T_CallerNotBorrower());
+        require(EulerCollateralVault(collateralVault).borrower() == msgSender, T_CallerNotBorrower());
 
-        address collateral = vault.asset();
-        address targetAsset = vault.targetAsset();
-
+        address collateral = EulerCollateralVault(collateralVault).asset();
+        address targetAsset = EulerCollateralVault(collateralVault).targetAsset();
 
         {
             if (underlyingCollateralAmount > 0) {
                 address underlyingCollateral = IEVault(collateral).asset();
-                IERC20(underlyingCollateral).safeTransferFrom(msg.sender, collateral, underlyingCollateralAmount);
+                IERC20(underlyingCollateral).safeTransferFrom(msgSender, collateral, underlyingCollateralAmount);
                 IEVault(collateral).skim(underlyingCollateralAmount, collateralVault);
             }
             if (collateralAmount > 0) {
-                IEVault(collateral).transferFrom(msg.sender, collateralVault, collateralAmount);
+                IEVault(collateral).transferFrom(msgSender, collateralVault, collateralAmount);
             }
         }
 
@@ -111,7 +103,7 @@ contract LeverageOperator is ReentrancyGuardTransient, IErrors, IEvents {
             targetAsset,
             flashloanAmount,
             abi.encode(
-                msg.sender,
+                msgSender,
                 collateralVault,
                 collateral,
                 targetAsset,
@@ -175,7 +167,7 @@ contract LeverageOperator is ReentrancyGuardTransient, IErrors, IEvents {
             data: abi.encodeCall(CollateralVaultBase.borrow, (amount, address(this)))
         });
 
-        IEVC(EVC).batch(items);
+        IEVC(evc).batch(items);
 
         // Step 6: Approve Morpho to take repayment
         IERC20(targetAsset).forceApprove(address(MORPHO), amount);

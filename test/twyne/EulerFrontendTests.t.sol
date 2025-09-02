@@ -12,6 +12,8 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
+import {MockSwapper} from "test/mocks/MockSwapper.sol";
+import {Errors as EVCErrors} from "ethereum-vault-connector/Errors.sol";
 
 contract EulerFrontendTests is EulerTestBase {
     function setUp() public override {
@@ -269,4 +271,143 @@ contract EulerFrontendTests is EulerTestBase {
         assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Collateral vault is not empty!");
     }
 
+    function test_e_frontend_depositUnderlyingViaTwyneEVC() external noGasMetering {
+        // Bob convert WETH from eulerWETH
+        vm.startPrank(bob);
+        // First, approve permit2 to allow permit2 usage in batch
+        IERC20(WETH).approve(permit2, type(uint).max);
+        Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
+
+        IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
+            details: IAllowanceTransfer.PermitDetails({
+                token: WETH,
+                amount: uint160(CREDIT_LP_AMOUNT),
+                expiration: type(uint48).max,
+                nonce: 0
+            }),
+            spender: address(evc),
+            sigDeadline: type(uint256).max
+        });
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](4);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: permit2,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
+                bob,
+                permitSingle,
+                permit2Signer.signPermitSingle(bobKey, permitSingle)
+            )
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: permit2,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint160,address)",
+                bob,
+                address(evc),
+                CREDIT_LP_AMOUNT,
+                WETH
+            )
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: WETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IERC20(WETH).approve, (eulerWETH, type(uint).max))
+        });
+        items[3] = IEVC.BatchItem({
+            targetContract: eulerWETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IEVault(eulerWETH).deposit, (CREDIT_LP_AMOUNT, bob))
+        });
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+        evc.batch(items);
+        vm.stopPrank();
+
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+    }
+
+    function test_e_frontend_depositETHViaTwyneEVC() external noGasMetering {
+        // Bob converts ETH to eulerWETH
+        vm.startPrank(bob);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+
+        uint bal = bob.balance;
+        console2.log(bal);
+        items[0] = IEVC.BatchItem({
+            targetContract: WETH,
+            onBehalfOfAccount: bob,
+            value: bal,
+            data: abi.encodeWithSignature("deposit()")
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: WETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IERC20(WETH).approve, (eulerWETH, type(uint).max))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: eulerWETH,
+            onBehalfOfAccount: bob,
+            value: 0,
+            data: abi.encodeCall(IEVault(eulerWETH).deposit, (bal, bob))
+        });
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+        evc.batch{value: bal}(items);
+        vm.stopPrank();
+
+        console2.log(IEVault(eulerWETH).balanceOf(bob));
+    }
+
+    // Test 1-click leverage functionality
+    function test_e_1clickLeverage() public noGasMetering {
+        e_creditDeposit(eulerWETH);
+        MockSwapper mockSwapper = new MockSwapper();
+        vm.etch(eulerSwapper, address(mockSwapper).code);
+
+        // Step 1: Create collateral vault for user
+        vm.startPrank(alice);
+        EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV
+            })
+        );
+
+        // Approve leverage operator to take user's collateral
+        IERC20(eulerWETH).approve(address(leverageOperator), type(uint).max);
+        IERC20(WETH).approve(address(leverageOperator), type(uint).max);
+
+        uint userUnderlyingCollateralAmount = 1 ether; // User provides 1 WETH
+        uint userCollateralAmount = 1 ether; // User provides 1 eulerWETH
+        uint flashloanAmount = 20000 * 1e6; // Flashloan 20,000 USDC
+        uint minAmountOutWETH = 20 ether; // Expect at least 20 WETH from swap
+        uint deadline = block.timestamp + 10; // deadline of the swap quote
+
+        deal(WETH, eulerSwapper, minAmountOutWETH + 10);
+        // Prepare swap data for the swapper. This is mock data.
+        bytes memory swapData = abi.encodeCall(MockSwapper.swap, (USDC, WETH, flashloanAmount, minAmountOutWETH, eulerWETH));
+        bytes[] memory multicallData = new bytes[](1);
+        // Swapper.multicall is called with `multicallData`
+        multicallData[0] = swapData;
+
+        evc.setAccountOperator(alice, address(leverageOperator), true);
+        // Execute leverage through the operator
+        leverageOperator.executeLeverage(
+            address(alice_collateral_vault),
+            userUnderlyingCollateralAmount,
+            userCollateralAmount,
+            flashloanAmount,
+            minAmountOutWETH,
+            deadline,
+            multicallData
+        );
+    }
 }

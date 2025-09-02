@@ -44,9 +44,11 @@ contract MockCollateralVault is CollateralVaultBase {
     ) external initializer override {
         __CollateralVaultBase_init(__asset, __borrower, __liqLTV, __vaultManager);
 
-        eulerEVC.enableCollateral(address(this), address(__asset));
-        eulerEVC.enableController(address(this), targetVault);
-        SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max);
+        eulerEVC.enableCollateral(address(this), address(__asset)); // necessary for Euler Finance EVK borrowing
+        eulerEVC.enableController(address(this), targetVault); // necessary for Euler Finance EVK borrowing
+        SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max); // necessary for repay()
+        SafeERC20.forceApprove(IERC20(IEVault(address(__asset)).asset()), address(__asset), type(uint).max); // necessary for _depositUnderlying()
+        emit T_CollateralVaultInitialized();
     }
 
     /// @dev increment the version for proxy upgrades
@@ -122,11 +124,12 @@ contract MockCollateralVault is CollateralVaultBase {
         // How: Check if within some margin (say, 2%) of this liquidation point
         // Note: This method ignores the internal borrow, because Euler does not consider it at all
 
+        address __asset = asset();
         // cache the debt owed to the targetVault
         (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
 
         // externalCollateralValueScaledByLiqLTV is actual collateral value * externalLiquidationLTV, so it's lower than the real value
-        if (externalBorrowDebtValue * MAXFACTOR > uint(twyneVaultManager.externalLiqBuffers(asset())) * externalCollateralValueScaledByLiqLTV) {
+        if (externalBorrowDebtValue * MAXFACTOR > uint(twyneVaultManager.externalLiqBuffers(__asset)) * externalCollateralValueScaledByLiqLTV) {
             // note to avoid divide by zero case, don't divide by externalCollateralValueScaledByLiqLTV
             return true;
         }
@@ -144,7 +147,7 @@ contract MockCollateralVault is CollateralVaultBase {
         // userOwnedCollateralAmount = vaultOwnedCollateralAmount - internalBorrowDebtAmount
         // userOwnedCollateralValue = userOwnedCollateralAmount converted to USD
         uint userCollateralValue = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
-            totalAssetsDepositedOrReserved - maxRelease(), asset(), IEVault(intermediateVault).unitOfAccount());
+            totalAssetsDepositedOrReserved - maxRelease(), __asset, IEVault(intermediateVault).unitOfAccount());
 
         // note to avoid divide by zero case, don't divide by borrowerOwnedCollateralValue
         return (externalBorrowDebtValue * MAXFACTOR > twyneLiqLTV * userCollateralValue);
@@ -171,8 +174,8 @@ contract MockCollateralVault is CollateralVaultBase {
         uint liquidatorReward;
 
         if (_maxRepay > 0) {
-            liquidatorReward = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
-                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(asset()),
+            liquidatorReward = twyneVaultManager.oracleRouter().getQuote(
+                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(__asset),
                 targetAsset,
                 IEVault(__asset).asset()
             );
@@ -239,18 +242,24 @@ contract MockCollateralVault is CollateralVaultBase {
     }
 
     /// @notice allow users of the underlying protocol to seamlessly transfer their position to this vault
-    function teleport(uint toDeposit, uint toBorrow) external override onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
+    function teleport(uint toDeposit, uint toBorrow, uint8 subAccountId) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
 
         totalAssetsDepositedOrReserved += toDeposit;
         _handleExcessCredit(_invariantCollateralAmount());
+
+        address subAccount = address(uint160(uint160(borrower) ^ subAccountId));
+
+        if (toBorrow == type(uint).max) {
+            toBorrow = IEVault(targetVault).debtOf(subAccount);
+        }
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
         items[0] = IEVC.BatchItem({
             targetContract: asset(),
             onBehalfOfAccount: address(this),
             value: 0,
-            data: abi.encodeCall(IERC20.transferFrom, (borrower, address(this), toDeposit)) // needs allowance
+            data: abi.encodeCall(IERC20.transferFrom, (subAccount, address(this), toDeposit)) // needs allowance
         });
         items[1] = IEVC.BatchItem({
             targetContract: targetVault,
@@ -262,7 +271,7 @@ contract MockCollateralVault is CollateralVaultBase {
             targetContract: targetVault,
             onBehalfOfAccount: address(this),
             value: 0,
-            data: abi.encodeCall(IEVault(targetVault).repay, (toBorrow, borrower))
+            data: abi.encodeCall(IEVault(targetVault).repay, (toBorrow, subAccount))
         });
         eulerEVC.batch(items);
 

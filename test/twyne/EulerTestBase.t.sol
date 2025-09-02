@@ -29,21 +29,26 @@ contract EulerTestBase is OverCollateralizedTestBase {
         // Bob deposits into intermediate_vault to earn boosted yield
         vm.startPrank(bob);
         IERC20(collateralAssets).approve(address(intermediate_vault), type(uint256).max);
-        if (IERC20(IEVault(collateralAssets).asset()).decimals() < 18) {
-            CREDIT_LP_AMOUNT /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
-            COLLATERAL_AMOUNT /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
-            INITIAL_DEALT_ETOKEN /= (10 ** (18 - IERC20(IEVault(collateralAssets).asset()).decimals()));
-            intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
-        } else {
-            intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
+        uint8 decimals = IERC20(IEVault(collateralAssets).asset()).decimals();
+        if (decimals < 18) {
+            CREDIT_LP_AMOUNT /= (10 ** (18 - decimals));
+            COLLATERAL_AMOUNT /= (10 ** (18 - decimals));
+            INITIAL_DEALT_ETOKEN /= (10 ** (18 - decimals));
         }
+        intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
         vm.stopPrank();
 
         assertEq(intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT, "Incorrect CREDIT_LP_AMOUNT deposited");
     }
 
     // parent
-    function e_createCollateralVault(address collateralAssets) public noGasMetering {
+    function e_createCollateralVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        // copy logic from checkLiqLTV
+        uint16 minLTV = IEVault(eulerUSDC).LTVLiquidation(eulerWETH);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(eulerWETH);
+        vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(eulerWETH));
+
         e_creditDeposit(collateralAssets);
 
         // Alice creates eWETH collateral vault with USDC target asset
@@ -52,7 +57,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
             collateralVaultFactory.createCollateralVault({
                 _asset: collateralAssets,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: liqLTV
             })
         );
         vm.stopPrank();
@@ -61,8 +66,8 @@ contract EulerTestBase is OverCollateralizedTestBase {
     }
 
     // parent
-    function e_totalAssetsIntermediateVault(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+    function e_totalAssetsIntermediateVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_createCollateralVault(collateralAssets, liqLTV);
         IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
         // eve donates to collateral vault, ensure this doesn't increase its totalAssets
         vm.startPrank(eve);
@@ -81,8 +86,8 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
     // Verify how totalAssets works with a donation attack (EVK ignore the amount)
     // This functionality could be disabled by setting the OP_SKIM opcode
-    function e_totalAssetsCollateralVault(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+    function e_totalAssetsCollateralVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_createCollateralVault(collateralAssets, liqLTV);
         // eve donates to collateral vault, ensure this doesn't increase its totalAssets
         vm.startPrank(eve);
         IERC20(collateralAssets).transfer(address(alice_collateral_vault), COLLATERAL_AMOUNT);
@@ -154,8 +159,8 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
     // parent
     // Test the case of B = 0 (no borrowed assets from the external protocol) with non-zero C and C_LP
-    function e_collateralDepositWithoutBorrow(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+    function e_collateralDepositWithoutBorrow(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_createCollateralVault(collateralAssets, liqLTV);
 
         vm.startPrank(alice);
         assertEq(alice_collateral_vault.borrower(), alice);
@@ -188,7 +193,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     // 100% can be withdrawn if there is no reserved assets in any collateral vault
     function e_creditWithdrawWithInterestAndNoFees(address collateralAssets, uint warpBlockAmount) public noGasMetering {
         vm.assume(warpBlockAmount < forkBlockDiff);
-        e_collateralDepositWithoutBorrow(collateralAssets);
+        e_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
         IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
 
@@ -260,7 +265,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     // credit LP withdraws their deposit in the intermediate vault
     // 100% can be withdrawn if there is no reserved assets in any collateral vault
     function e_creditWithdrawWithInterestAndFees(address collateralAssets) public noGasMetering {
-        e_collateralDepositWithoutBorrow(collateralAssets);
+        e_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
         IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
 
@@ -337,7 +342,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     // Test the case of C_LP = 0 (no reserved assets) with non-zero C and B
     // This should be identical to using the underlying protocol without Twyne
     function e_collateralDepositWithBorrow(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+        e_createCollateralVault(collateralAssets, 0.9e4);
 
         uint aliceUSDCBalanceBefore = IERC20(USDC).balanceOf(alice);
 
@@ -393,7 +398,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     // Deposit WETH instead of eWETH into Twyne
     // This allows users to bypass the Euler Finance frontend entirely
     function e_collateralDepositUnderlying(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+        e_createCollateralVault(collateralAssets, 0.9e4);
 
         vm.startPrank(alice);
         assertEq(alice_collateral_vault.borrower(), alice);
@@ -554,7 +559,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     // Test that if time passes, user can withdraw all it's share of the collateral
     function e_withdrawCollateralAfterWarp(address collateralAssets, uint warpBlockAmount) public noGasMetering {
         vm.assume(warpBlockAmount < forkBlockDiff); // this keeps the block number less than or equal to the current block. Depends on which chain is being tested
-        e_createCollateralVault(collateralAssets);
+        e_createCollateralVault(collateralAssets, 0.9e4);
 
         vm.startPrank(alice);
 
@@ -619,7 +624,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
     // Test the user withdrawing WETH from the collateral vault
     function e_redeemUnderlying(address collateralAssets) public noGasMetering {
-        e_collateralDepositWithoutBorrow(collateralAssets);
+        e_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
         // Confirm redeemUnderlying cannot be called by anyone
         vm.startPrank(bob);
@@ -672,7 +677,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     }
 
     function e_firstBorrowFromEulerDirect(address collateralAssets) public noGasMetering {
-        e_collateralDepositWithoutBorrow(collateralAssets);
+        e_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
         uint256 aliceBalanceBefore = IERC20(USDC).balanceOf(alice);
 
@@ -696,7 +701,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
     // Collateral vault borrows from the external protocol
     function e_firstBorrowFromEulerViaCollateral(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+        e_createCollateralVault(collateralAssets, 0.9e4);
 
         // START DEBUG BLOCK
         // console2.log("COLLATERAL_AMOUNT", COLLATERAL_AMOUNT);
@@ -751,7 +756,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
     function e_maxBorrowFromEulerDirect(address collateralAssets, uint16 collateralMultiplier) public noGasMetering {
         vm.assume(collateralMultiplier <= MAXFACTOR);
         vm.assume(collateralMultiplier > 0);
-        e_createCollateralVault(collateralAssets);
+        e_createCollateralVault(collateralAssets, 0.9e4);
 
         // Adjust COLLATERAL_AMOUNT by a random multiplier value
         COLLATERAL_AMOUNT *= collateralMultiplier;
@@ -855,7 +860,6 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
         vm.stopPrank();
 
-        console2.log("balanceOf 1", IERC20(collateralAssets).balanceOf(address(alice_collateral_vault)));
         assertEq(IERC20(collateralAssets).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
         // alice balance is restored to the dealt amount
     }
@@ -1028,7 +1032,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
     // user sets their custom LTV before borrowing
     function e_setTwyneLiqLTVNoBorrow(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+        e_createCollateralVault(collateralAssets, 0.9e4);
 
         vm.startPrank(alice);
         // Toggle LTV before any borrows exist
@@ -1050,7 +1054,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
         alice_collateral_vault.setTwyneLiqLTV(1e4);
 
         uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset());
-        alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 800);
+        alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 200);
         alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 400);
         alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV);
         vm.stopPrank();
@@ -1092,7 +1096,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
 
         IEVault(collateralAssets).approve(address(teleporter_collateral_vault), C);
         uint C_LP = getReservedAssets(C, teleporter_collateral_vault);
-        teleporter_collateral_vault.teleport(C, B);
+        teleporter_collateral_vault.teleport(C, B, 0);
         vm.stopPrank();
 
         assertEq(IEVault(eulerUSDC).debtOf(teleporter), 0, "user debt not correct after teleport");
@@ -1124,7 +1128,7 @@ contract EulerTestBase is OverCollateralizedTestBase {
         C_LP = getReservedAssets(C, teleporter_collateral_vault);
         assertEq(C_LP, 0, "C_LP should be 0 when liqLTV_twyne == effective_liqLTV_euler");
 
-        teleporter_collateral_vault.teleport(C, B);
+        teleporter_collateral_vault.teleport(C, B, 0);
         vm.stopPrank();
 
         assertEq(IEVault(eulerUSDC).debtOf(teleporter), 0, "C_LP should be 0 when liqLTV_twyne == effective_liqLTV_euler");
@@ -1135,8 +1139,272 @@ contract EulerTestBase is OverCollateralizedTestBase {
         assertEq(intermediate_vault.debtOf(address(teleporter_collateral_vault)), C_LP);
     }
 
+    function e_depositUnderlyingToIntermediateVault(address collateralAssets) public {
+        vm.assume(isValidCollateralAsset(collateralAssets));
+
+        // Setup: create intermediate vault with deposits
+        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        address underlyingAsset = IEVault(collateralAssets).asset();
+
+        uint256 depositAmount = 1e18;
+
+        {
+            uint8 decimals = IERC20(IEVault(collateralAssets).asset()).decimals();
+            if (decimals < 18) {
+                depositAmount /= (10 ** (18 - decimals));
+            }
+        }
+
+        // Give alice underlying assets
+        deal(underlyingAsset, alice, depositAmount);
+
+        // Take snapshot before testing
+        uint256 snapshot = vm.snapshotState();
+
+        // TEST 1: Direct call with plain approval
+        vm.startPrank(alice);
+
+        // Set up plain ERC20 approval
+        IERC20(underlyingAsset).approve(address(eulerWrapper), depositAmount);
+
+        // Record balances before
+        uint256 aliceUnderlyingBefore = IERC20(underlyingAsset).balanceOf(alice);
+        uint256 aliceIntermediateSharesBefore = intermediateVault.balanceOf(alice);
+
+        // Call the function directly
+        uint256 sharesReceived = eulerWrapper.depositUnderlyingToIntermediateVault(
+            intermediateVault,
+            depositAmount
+        );
+
+        vm.stopPrank();
+
+        // Verify results for direct call
+        assertEq(IERC20(underlyingAsset).balanceOf(alice), aliceUnderlyingBefore - depositAmount, "Alice underlying balance incorrect");
+        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBefore + sharesReceived, "Alice intermediate shares incorrect");
+        assertEq(IERC20(underlyingAsset).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold underlying");
+        assertEq(IEVault(collateralAssets).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold euler shares");
+        assertGt(sharesReceived, 0, "Should receive some shares");
+
+        // Revert to snapshot for batch test
+        vm.revertToState(snapshot);
+
+        // TEST 2: Batch call with permit2
+        vm.startPrank(alice);
+
+        // First approve permit2 to spend the tokens
+        IERC20(underlyingAsset).approve(permit2, type(uint256).max);
+
+        // Create permit2 signature
+        Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
+        IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
+            details: IAllowanceTransfer.PermitDetails({
+                token: underlyingAsset,
+                amount: uint160(depositAmount),
+                expiration: type(uint48).max,
+                nonce: 0
+            }),
+            spender: address(eulerWrapper),
+            sigDeadline: type(uint256).max
+        });
+
+        // Record balances before batch
+        uint256 aliceUnderlyingBeforeBatch = IERC20(underlyingAsset).balanceOf(alice);
+        uint256 aliceIntermediateSharesBeforeBatch = intermediateVault.balanceOf(alice);
+
+        // Call the function through EVC batch with permit2
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+
+        // First item: permit2 permit
+        items[0] = IEVC.BatchItem({
+            targetContract: permit2,
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeWithSignature(
+                "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
+                alice,
+                permitSingle,
+                permit2Signer.signPermitSingle(aliceKey, permitSingle)
+            )
+        });
+
+        // Second item: deposit function
+        items[1] = IEVC.BatchItem({
+            targetContract: address(eulerWrapper),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(
+                eulerWrapper.depositUnderlyingToIntermediateVault,
+                (intermediateVault, depositAmount)
+            )
+        });
+
+        evc.batch(items);
+
+        // Calculate sharesReceived by checking balance difference
+        uint256 aliceIntermediateSharesAfterBatch = intermediateVault.balanceOf(alice);
+        uint256 sharesReceivedBatch = aliceIntermediateSharesAfterBatch - aliceIntermediateSharesBeforeBatch;
+
+        vm.stopPrank();
+
+        // Verify results for batch call
+        assertEq(IERC20(underlyingAsset).balanceOf(alice), aliceUnderlyingBeforeBatch - depositAmount, "Alice underlying balance incorrect in batch");
+        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBeforeBatch + sharesReceivedBatch, "Alice intermediate shares incorrect in batch");
+        assertEq(IERC20(underlyingAsset).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold underlying in batch");
+        assertEq(IEVault(collateralAssets).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold euler shares in batch");
+        assertGt(sharesReceivedBatch, 0, "Should receive some shares in batch");
+
+        // Both tests should yield the same amount of shares
+        assertEq(sharesReceived, sharesReceivedBatch, "Direct and batch calls should yield same shares");
+    }
+
+    function e_depositETHToIntermediateVault(address collateralAssets) public {
+        vm.assume(isValidCollateralAsset(collateralAssets));
+
+        // Only test with WETH-based assets since ETH deposits only work with WETH
+        address underlyingAsset = IEVault(collateralAssets).asset();
+
+        uint256 ethDepositAmount = 1 ether;
+        vm.deal(alice, ethDepositAmount);
+
+        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+
+        if (underlyingAsset != WETH) {
+            // Test that depositETHToIntermediateVault reverts when used with non-WETH underlying
+            vm.expectRevert(TwyneErrors.OnlyWETH.selector);
+            eulerWrapper.depositETHToIntermediateVault{value: 1e18}(intermediateVault);
+            vm.stopPrank();
+            return;
+        }
+
+
+        uint256 snapshot = vm.snapshotState();
+
+        // TEST 1: Direct call
+        vm.startPrank(alice);
+
+        uint256 aliceETHBefore = alice.balance;
+        uint256 aliceIntermediateSharesBefore = intermediateVault.balanceOf(alice);
+
+        uint256 sharesReceived = eulerWrapper.depositETHToIntermediateVault{value: ethDepositAmount}(
+            intermediateVault
+        );
+
+        vm.stopPrank();
+
+        assertEq(alice.balance, aliceETHBefore - ethDepositAmount, "Alice ETH balance incorrect");
+        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBefore + sharesReceived, "Alice intermediate shares incorrect");
+        assertEq(IERC20(WETH).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold WETH");
+        assertEq(IEVault(collateralAssets).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold euler shares");
+        assertEq(address(eulerWrapper).balance, 0, "Wrapper should not hold ETH");
+        assertGt(sharesReceived, 0, "Should receive some shares");
+
+        vm.revertToState(snapshot);
+
+        // TEST 2: Batch call through EVC
+        vm.startPrank(alice);
+
+        uint256 aliceETHBeforeBatch = alice.balance;
+        uint256 aliceIntermediateSharesBeforeBatch = intermediateVault.balanceOf(alice);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+
+        // ETH deposit function
+        items[0] = IEVC.BatchItem({
+            targetContract: address(eulerWrapper),
+            onBehalfOfAccount: alice,
+            value: ethDepositAmount,
+            data: abi.encodeCall(eulerWrapper.depositETHToIntermediateVault, (intermediateVault))
+        });
+
+        evc.batch{value: ethDepositAmount}(items);
+
+        uint256 aliceIntermediateSharesAfterBatch = intermediateVault.balanceOf(alice);
+        uint256 sharesReceivedBatch = aliceIntermediateSharesAfterBatch - aliceIntermediateSharesBeforeBatch;
+
+        vm.stopPrank();
+
+        // Verify results for batch call
+        assertEq(alice.balance, aliceETHBeforeBatch - ethDepositAmount, "Alice ETH balance incorrect in batch");
+        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBeforeBatch + sharesReceivedBatch, "Alice intermediate shares incorrect in batch");
+        assertEq(IERC20(WETH).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold WETH in batch");
+        assertEq(IEVault(collateralAssets).balanceOf(address(eulerWrapper)), 0, "Wrapper should not hold euler shares in batch");
+        assertEq(address(eulerWrapper).balance, 0, "Wrapper should not hold ETH in batch");
+        assertGt(sharesReceivedBatch, 0, "Should receive some shares in batch");
+
+        // Both tests should yield the same amount of shares
+        assertEq(sharesReceived, sharesReceivedBatch, "Direct and batch calls should yield same shares");
+    }
+
     // TODO Test the scenario where one user is a credit LP and a borrower at the same time
 
     // TODO Test the scenario where a fake intermediate vault is created
     // and the borrow from it causes near-instant liquidation for the user
+
+    function e_skim(address collateralAssets) public noGasMetering {
+        // Setup: Alice creates a collateral vault and deposits
+        e_collateralDepositWithBorrow(collateralAssets);
+
+        vm.startPrank(alice);
+
+        // Initial state
+        uint256 initialTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint256 initialVaultBalance = IERC20(collateralAssets).balanceOf(address(alice_collateral_vault));
+        uint initialBorrow = alice_collateral_vault.maxRepay();
+        uint256 aliceBalanceBefore = initialTotalAssets - alice_collateral_vault.maxRelease();
+
+        // skim with no excess should be a noop
+        assertEq(initialTotalAssets, initialVaultBalance, "Should start with matching totals");
+
+        // Calling skim when there's no excess should not change anything
+        alice_collateral_vault.skim();
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), initialTotalAssets, "Skim with no excess should not change total");
+        vm.stopPrank();
+
+        // Someone airdrops tokens directly to the vault
+        address airdropper = makeAddr("airdropper");
+        dealEToken(collateralAssets, airdropper, 2 ether);
+
+        uint256 airdropAmount = IERC20(collateralAssets).balanceOf(airdropper);
+
+        // Bob transfers eTokens directly to the vault (simulating accidental transfer)
+        vm.startPrank(airdropper);
+        IERC20(collateralAssets).transfer(address(alice_collateral_vault), airdropAmount);
+        vm.stopPrank();
+
+        // Verify the vault now has extra tokens
+        uint256 vaultBalanceAfterTransfer = IERC20(collateralAssets).balanceOf(address(alice_collateral_vault));
+        assertEq(vaultBalanceAfterTransfer, initialVaultBalance + airdropAmount, "Vault should have extra tokens");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), initialTotalAssets, "totalAssets should not change yet");
+
+        // Test: Only borrower can call skim
+        vm.startPrank(airdropper);
+        vm.expectRevert(TwyneErrors.ReceiverNotBorrower.selector);
+        alice_collateral_vault.skim();
+        vm.stopPrank();
+
+        // Test: Borrower calls skim through EVC
+        vm.startPrank(alice);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.skim, ())
+        });
+
+        evc.batch(items);
+
+        uint256 finalTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint256 finalVaultBalance = IERC20(collateralAssets).balanceOf(address(alice_collateral_vault));
+        uint256 aliceBalanceAfter = finalTotalAssets - alice_collateral_vault.maxRelease();
+
+
+        assertEq(finalTotalAssets, finalVaultBalance, "After skim: totalAssets should match vault balance");
+        assertEq(alice_collateral_vault.maxRepay(), initialBorrow, "After skim: borrow amount shouldn't change");
+        assertEq(aliceBalanceAfter - aliceBalanceBefore, airdropAmount, "After skim: borrower's collateral should increase by airdrop amout");
+
+        vm.stopPrank();
+    }
 }

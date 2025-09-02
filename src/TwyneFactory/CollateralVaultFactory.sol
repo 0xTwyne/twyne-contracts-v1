@@ -2,8 +2,9 @@
 
 pragma solidity ^0.8.28;
 
-import {Ownable, Context} from "openzeppelin-contracts/access/Ownable.sol";
-import {Pausable} from "openzeppelin-contracts/utils/Pausable.sol";
+import {OwnableUpgradeable, ContextUpgradeable} from "openzeppelin-upgradeable/access/OwnableUpgradeable.sol";
+import {PausableUpgradeable} from "openzeppelin-upgradeable/utils/PausableUpgradeable.sol";
+import {UUPSUpgradeable} from "openzeppelin-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {BeaconProxy} from "openzeppelin-contracts/proxy/beacon/BeaconProxy.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
@@ -15,7 +16,7 @@ import {IEvents} from "src/interfaces/IEvents.sol";
 
 /// @title CollateralVaultFactory
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
-contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors, IEvents {
+contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, PausableUpgradeable, EVCUtil, IErrors, IEvents {
     mapping(address targetVault => address beacon) public collateralVaultBeacon;
     mapping(address => bool) public isCollateralVault;
 
@@ -26,7 +27,27 @@ contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors, IEvents 
     VaultManager public vaultManager;
     mapping(address => uint nonce) public nonce;
 
-    constructor(address _owner, address _evc) Ownable(_owner) EVCUtil(_evc) {}
+    uint[50] private __gap;
+
+    constructor(address _evc) EVCUtil(_evc) {
+        _disableInitializers();
+    }
+
+    /// @notice Initialize the CollateralVaultFactory
+    /// @param _owner Address of the initial owner
+    function initialize(address _owner) external initializer {
+        __Ownable_init(_owner);
+        __Pausable_init();
+        __UUPSUpgradeable_init();
+    }
+
+    /// @dev override required by UUPSUpgradeable
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /// @dev increment the version for proxy upgrades
+    function version() external pure returns (uint) {
+        return 1;
+    }
 
     function getCollateralVaults(address borrower) external view returns (address[] memory) {
         return collateralVaults[borrower];
@@ -57,7 +78,7 @@ contract CollateralVaultFactory is Ownable, Pausable, EVCUtil, IErrors, IEvents 
         emit T_FactoryPause(p);
     }
 
-    function _msgSender() internal view override(Context, EVCUtil) returns (address) {
+    function _msgSender() internal view override(ContextUpgradeable, EVCUtil) returns (address) {
         return EVCUtil._msgSender();
     }
 

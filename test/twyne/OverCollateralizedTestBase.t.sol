@@ -7,11 +7,14 @@ import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {ChainlinkOracle} from "euler-price-oracle/src/adapter/chainlink/ChainlinkOracle.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
+import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
+import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {MockPriceOracle} from "euler-vault-kit/../test/mocks/MockPriceOracle.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
+import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
@@ -24,7 +27,8 @@ interface IWETH is IERC20 {
 contract OverCollateralizedTestBase is TwyneVaultTestBase {
     uint256 aliceKey; // Alice needs a private key for permit2 signing
     address alice;
-    address bob = makeAddr("bob"); // benevolent bob, supplies intermediate asset
+    uint bobKey;
+    address bob; // benevolent bob, supplies intermediate asset
     address eve = makeAddr("eve"); // evil eve, blackhat and uses Twyne in ways we don't want
     address liquidator = makeAddr("liquidator"); // liquidator of unhealthy positions
     address teleporter = makeAddr("teleporter");
@@ -36,6 +40,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
 
     error InvalidInvariant();
     error NoConfiguredOracle();
+    error InvalidCollateral();
 
     VaultManager twyneVaultManager;
     HealthStatViewer healthViewer;
@@ -43,10 +48,12 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
     EulerCollateralVault alice_WSTETH_collateral_vault;
     IEVault eeWETH_intermediate_vault;
     IEVault eeWSTETH_intermediate_vault;
+    EulerWrapper eulerWrapper;
+    LeverageOperator leverageOperator;
 
     uint16 maxLTVInitial;
     uint16 externalLiqBufferInitial;
-    uint16 constant twyneLiqLTV = 0.9e4;
+    uint16 twyneLiqLTV = 0.9e4;
     uint constant MAXFACTOR = 1e4;
     uint256 constant INITIAL_DEALT_ERC20 = 100 ether;
     uint256 INITIAL_DEALT_ETOKEN = 20 ether;
@@ -155,13 +162,39 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
         super.setUp();
 
         (alice, aliceKey) = makeAddrAndKey("alice"); // active trader alice, trades dog coins
+        (bob, bobKey) = makeAddrAndKey("bob");
 
         // Create vault manager and configure
         vm.startPrank(admin);
 
-        twyneVaultManager = new VaultManager(admin, address(collateralVaultFactory));
+        // Deploy VaultManager implementation
+        VaultManager vaultManagerImpl = new VaultManager();
+
+        // Create initialization data for VaultManager
+        bytes memory initData = abi.encodeCall(VaultManager.initialize, (admin, address(collateralVaultFactory)));
+
+        // Deploy VaultManager proxy
+        ERC1967Proxy vaultManagerProxy = new ERC1967Proxy(address(vaultManagerImpl), initData);
+        twyneVaultManager = VaultManager(payable(address(vaultManagerProxy)));
 
         healthViewer = new HealthStatViewer();
+
+        eulerWrapper = new EulerWrapper(address(evc), IEVault(eulerWETH).asset());
+
+        // Deploy LeverageOperator
+        leverageOperator = new LeverageOperator(
+            address(evc),
+            eulerSwapper,
+            eulerSwapVerifier,
+            morpho,
+            address(collateralVaultFactory)
+        );
+
+        // Add labels for new addresses
+        vm.label(address(leverageOperator), "leverageOperator");
+        vm.label(eulerSwapper, "eulerSwapper");
+        vm.label(eulerSwapVerifier, "eulerSwapVerifier");
+        vm.label(morpho, "morpho");
 
         // Set BORROW_USD_AMOUNT dynamically
         uint256 externalEulerLTV = IEVault(eulerUSDC).LTVBorrow(eulerWETH);
@@ -204,15 +237,16 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
             vm.label(address(intermediateVault), intermediate_vault_label);
             // Now make sure the intermediate vault is allowed to borrow all target assets
             for (uint targetIndex; targetIndex<fixtureTargetAssets.length; targetIndex++) {
+                require(IEVault(fixtureTargetAssets[targetIndex]).LTVBorrow(intermediateVault.asset()) != 0, InvalidCollateral());
                 twyneVaultManager.setAllowedTargetVault(address(intermediateVault), fixtureTargetAssets[targetIndex]);
             }
         }
 
-        // Create eeWETH intermediate vault
-        eeWETH_intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWETH)); //newIntermediateVault(eulerWETH, address(oracleRouter), USD);
+        // Get created eeWETH intermediate vault
+        eeWETH_intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWETH));
 
-        // Create eeWSTETH intermediate vault
-        eeWSTETH_intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWSTETH)); //newIntermediateVault(eulerWSTETH, address(oracleRouter), USD);
+        // Get created eeWSTETH intermediate vault
+        eeWSTETH_intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWSTETH));
 
         // set targetAsset -> USD oracle, specifically for the partial external liquidation edge case
         // twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(eulerUSDC).asset(), USD, address(eulerExternalOracle))));

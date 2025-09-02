@@ -2,7 +2,8 @@
 
 pragma solidity ^0.8.28;
 
-import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
+import {UUPSUpgradeable} from "openzeppelin-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {OwnableUpgradeable} from "openzeppelin-upgradeable/access/OwnableUpgradeable.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
@@ -15,7 +16,7 @@ import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.so
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @notice Manages twyne parameters that affect it globally: assets allowed, LTVs, interest rates.
 /// To be owned by Twyne multisig.
-contract VaultManager is Ownable, IErrors, IEvents {
+contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     uint internal constant MAXFACTOR = 1e4;
 
     address public collateralVaultFactory;
@@ -30,13 +31,31 @@ contract VaultManager is Ownable, IErrors, IEvents {
 
     mapping(address intermediateVault => address[] targetVaults) public allowedTargetVaultList;
 
+    uint[50] private __gap;
+
     modifier onlyCollateralVaultFactoryOrOwner() {
         require(msg.sender == owner() || msg.sender == collateralVaultFactory, CallerNotOwnerOrCollateralVaultFactory());
         _;
     }
 
-    constructor(address _owner, address _factory) Ownable(_owner) {
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @param _owner address of initial owner
+    /// @param _factory address of collateral vault factory deployment
+    function initialize(address _owner, address _factory) external initializer {
+        __Ownable_init(_owner);
+        __UUPSUpgradeable_init();
         collateralVaultFactory = _factory;
+    }
+
+    /// @dev override required by UUPSUpgradeable
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    /// @dev increment the version for proxy upgrades
+    function version() external pure returns (uint) {
+        return 1;
     }
 
     /// @notice Set oracleRouter address. Governance-only.

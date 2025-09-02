@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 
 import {EulerTestBase} from "./EulerTestBase.t.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
-import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 contract EulerTestNormalActions is EulerTestBase {
     function setUp() public virtual override {
@@ -23,32 +22,32 @@ contract EulerTestNormalActions is EulerTestBase {
 
     // non-fuzzing unit test for single collateral
     function test_e_createWETHCollateralVault() public noGasMetering {
-        e_createCollateralVault(eulerWETH);
+        e_createCollateralVault(eulerWETH, 0.9e4);
     }
 
     // fuzzing entry point for all assets
-    function testFuzz_e_createCollateralVault(address collateralAssets) public noGasMetering {
-        e_createCollateralVault(collateralAssets);
+    function testFuzz_e_createCollateralVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_createCollateralVault(collateralAssets, liqLTV);
     }
 
     // non-fuzzing unit test for single collateral
     function test_e_totalAssetsIntermediateVault() public noGasMetering {
-        e_totalAssetsIntermediateVault(eulerWETH);
+        e_totalAssetsIntermediateVault(eulerWETH, 0.9e4);
     }
 
     // fuzzing entry point for all assets
-    function testFuzz_e_totalAssetsIntermediateVault(address collateralAssets) public noGasMetering {
-        e_totalAssetsIntermediateVault(collateralAssets);
+    function testFuzz_e_totalAssetsIntermediateVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_totalAssetsIntermediateVault(collateralAssets, liqLTV);
     }
 
     // non-fuzzing unit test for single collateral
     function test_e_totalAssetsCollateralVault() public noGasMetering {
-        e_totalAssetsCollateralVault(eulerWETH);
+        e_totalAssetsCollateralVault(eulerWETH, 0.9e4);
     }
 
     // fuzzing entry point for all assets
-    function testFuzz_e_totalAssetsCollateralVault(address collateralAssets) public noGasMetering {
-        e_totalAssetsCollateralVault(collateralAssets);
+    function testFuzz_e_totalAssetsCollateralVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_totalAssetsCollateralVault(collateralAssets, liqLTV);
     }
 
     // non-fuzzing unit test for single collateral
@@ -83,12 +82,12 @@ contract EulerTestNormalActions is EulerTestBase {
 
     // non-fuzzing unit test for single collateral
     function test_e_collateralDepositWithoutBorrow() public noGasMetering {
-        e_collateralDepositWithoutBorrow(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
     }
 
     // fuzzing entry point for all assets
-    function testFuzz_e_collateralDepositWithoutBorrow(address collateralAssets) public noGasMetering {
-        e_collateralDepositWithoutBorrow(collateralAssets);
+    function testFuzz_e_collateralDepositWithoutBorrow(address collateralAssets, uint16 liqLTV) public noGasMetering {
+        e_collateralDepositWithoutBorrow(collateralAssets, liqLTV);
     }
 
     function test_e_creditWithdrawWithInterestAndNoFees() public noGasMetering {
@@ -96,7 +95,7 @@ contract EulerTestNormalActions is EulerTestBase {
     }
 
     // fuzzing entry point for all assets
-    function testFuzz_e_creditWithdrawWithInterestAndNoFees(address collateralAssets, uint warpBlockAmount) public noGasMetering {
+    function testFuzz_e_creditWithdrawWithInterestAndNoFees(address /* collateralAssets */, uint warpBlockAmount) public noGasMetering {
         e_creditWithdrawWithInterestAndNoFees(eulerWETH, warpBlockAmount); // TODO
     }
 
@@ -104,7 +103,7 @@ contract EulerTestNormalActions is EulerTestBase {
         e_creditWithdrawWithInterestAndFees(eulerWETH);
     }
 
-    function testFuzz_e_creditWithdrawWithInterestAndFees(address collateralAssets) public noGasMetering {
+    function testFuzz_e_creditWithdrawWithInterestAndFees(address /* collateralAssets */) public noGasMetering {
         e_creditWithdrawWithInterestAndFees(eulerWETH); // TODO
     }
 
@@ -207,7 +206,7 @@ contract EulerTestNormalActions is EulerTestBase {
     }
 
     // fuzzing entry point for all assets and different warp periods
-    function testFuzz_e_maxBorrowFromEulerDirect(address collateralAssets, uint16 collateralMultiplier) public noGasMetering {
+    function testFuzz_e_maxBorrowFromEulerDirect(address /* collateralAssets */, uint16 collateralMultiplier) public noGasMetering {
         e_maxBorrowFromEulerDirect(eulerWETH, collateralMultiplier); // TODO
     }
 
@@ -268,7 +267,7 @@ contract EulerTestNormalActions is EulerTestBase {
         e_teleportEulerPosition(eulerWETH);
     }
 
-    function testFuzz_e_teleportEulerPosition(address collateralAssets) public noGasMetering {
+    function testFuzz_e_teleportEulerPosition(address /* collateralAssets */) public noGasMetering {
         e_teleportEulerPosition(eulerWETH); // TODO
     }
 
@@ -343,5 +342,32 @@ contract EulerTestNormalActions is EulerTestBase {
 
             assertApproxEqRel(ir1, ir2, 3e16); // 3% margin of error
         }
+    }
+
+    // Test both direct and batch calls to depositUnderlyingToIntermediateVault
+    function test_e_depositUnderlyingToIntermediateVault() public noGasMetering {
+        e_depositUnderlyingToIntermediateVault(eulerWETH);
+    }
+
+    function testFuzz_e_depositUnderlyingToIntermediateVault(address collateralAssets) public noGasMetering {
+        e_depositUnderlyingToIntermediateVault(collateralAssets);
+    }
+
+    // Test both direct and batch calls to depositETHToIntermediateVault
+    function test_e_depositETHToIntermediateVault() public noGasMetering {
+        e_depositETHToIntermediateVault(eulerWETH);
+    }
+
+    function testFuzz_e_depositETHToIntermediateVault(address collateralAssets) public noGasMetering {
+        e_depositETHToIntermediateVault(collateralAssets);
+    }
+
+    // Test skim function
+    function test_e_skim() public noGasMetering {
+        e_skim(eulerWETH);
+    }
+
+    function testFuzz_e_skim(address collateralAssets) public noGasMetering {
+        e_skim(collateralAssets);
     }
 }

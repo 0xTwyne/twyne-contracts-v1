@@ -68,7 +68,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
 
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
-        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_SKIM);
+        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
         // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
             idealKinkInterestRate_: 600, // 6%

@@ -78,10 +78,11 @@ contract EulerTestBase is OverCollateralizedTestBase {
         assertEq(intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT, "totalAssets value mismatch after airdrop 1");
         assertEq(IEVault(collateralAssets).balanceOf(address(intermediate_vault)), 2*CREDIT_LP_AMOUNT);
 
-        // Would call skim() normally here, but this is blocked to prevent edge cases
-        vm.expectRevert(TwyneErrors.T_OperationDisabled.selector);
         intermediate_vault.skim(CREDIT_LP_AMOUNT, eve);
         vm.stopPrank();
+
+        assertEq(intermediate_vault.totalAssets(), 2*CREDIT_LP_AMOUNT, "skim failed after airdrop 1");
+        assertEq(intermediate_vault.balanceOf(eve), CREDIT_LP_AMOUNT, "skim failed after airdrop 1");
     }
 
     // Verify how totalAssets works with a donation attack (EVK ignore the amount)

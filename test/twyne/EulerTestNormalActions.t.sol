@@ -4,6 +4,9 @@ pragma solidity ^0.8.28;
 
 import {EulerTestBase} from "./EulerTestBase.t.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
+import {ReferenceEulerWrapper} from "test/mocks/ReferenceEulerWrapper.sol";
+import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
+import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 contract EulerTestNormalActions is EulerTestBase {
     function setUp() public virtual override {
@@ -369,5 +372,127 @@ contract EulerTestNormalActions is EulerTestBase {
 
     function testFuzz_e_skim(address collateralAssets) public noGasMetering {
         e_skim(collateralAssets);
+    }
+
+    // Fuzz test comparing new EulerWrapper implementation with reference (old) implementation
+    function testFuzz_EulerWrapperComparison(uint256 amount) public noGasMetering {
+        amount = bound(amount, 1, 10e18);
+
+        ReferenceEulerWrapper referenceWrapper = new ReferenceEulerWrapper(address(evc), WETH);
+
+        address collateralAsset = eulerWETH;
+        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAsset));
+
+        deal(WETH, alice, amount); // Give enough for both tests
+
+        vm.startPrank(alice);
+
+        // Test with reference (old) implementation
+        uint256 snapshot = vm.snapshot();
+
+        // Approve reference wrapper to spend alice's tokens
+        IERC20(WETH).approve(address(referenceWrapper), amount);
+
+        uint256 referenceResult;
+        bool referenceSuccess = true;
+        try referenceWrapper.depositUnderlyingToIntermediateVault(intermediateVault, amount) returns (uint256 result) {
+            referenceResult = result;
+        } catch {
+            referenceSuccess = false;
+        }
+
+        uint256 aliceBalanceAfterReference = IERC20(WETH).balanceOf(alice);
+        uint256 aliceSharesAfterReference = intermediateVault.balanceOf(alice);
+
+        // Revert to snapshot for new implementation test
+        vm.revertTo(snapshot);
+
+        // Test with new implementation
+        IERC20(WETH).approve(address(eulerWrapper), amount);
+
+        uint256 newResult;
+        bool newSuccess = true;
+        try eulerWrapper.depositUnderlyingToIntermediateVault(intermediateVault, amount) returns (uint256 result) {
+            newResult = result;
+        } catch {
+            newSuccess = false;
+        }
+
+        uint256 aliceBalanceAfterNew = IERC20(WETH).balanceOf(alice);
+        uint256 aliceSharesAfterNew = intermediateVault.balanceOf(alice);
+
+        vm.stopPrank();
+
+        // Both implementations should have same success/failure behavior
+        assertEq(newSuccess, referenceSuccess, "Success/failure behavior should match");
+
+        if (referenceSuccess && newSuccess) {
+            // Compare return values
+            assertEq(newResult, referenceResult, "Return values should be equal");
+
+            // Compare user balances after operation
+            assertEq(aliceBalanceAfterNew, aliceBalanceAfterReference, "User balances should be equal");
+            assertEq(aliceSharesAfterNew, aliceSharesAfterReference, "User shares should be equal");
+        }
+    }
+
+    // Fuzz test comparing ETH deposit functionality between implementations
+    function testFuzz_EulerWrapperETHComparison(uint256 amount) public noGasMetering {
+        amount = bound(amount, 1, 10 ether);
+
+        // Deploy reference (old) implementation
+        ReferenceEulerWrapper referenceWrapper = new ReferenceEulerWrapper(address(evc), WETH);
+
+        // Use existing eulerWETH as collateral and get intermediate vault
+        address collateralAsset = eulerWETH;
+        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAsset));
+
+        // Give alice enough ETH for both tests
+        deal(alice, amount); // Give enough ETH for both tests
+
+        vm.startPrank(alice);
+
+        // Test with reference (old) implementation
+        uint256 snapshot = vm.snapshot();
+
+        uint256 referenceResult;
+        bool referenceSuccess = true;
+        try referenceWrapper.depositETHToIntermediateVault{value: amount}(intermediateVault) returns (uint256 result) {
+            referenceResult = result;
+        } catch {
+            referenceSuccess = false;
+        }
+
+        uint256 aliceETHBalanceAfterReference = alice.balance;
+        uint256 aliceSharesAfterReference = intermediateVault.balanceOf(alice);
+
+        // Revert to snapshot for new implementation test
+        vm.revertTo(snapshot);
+
+        // Test with new implementation
+        uint256 newResult;
+        bool newSuccess = true;
+        try eulerWrapper.depositETHToIntermediateVault{value: amount}(intermediateVault) returns (uint256 result) {
+            newResult = result;
+        } catch {
+            newSuccess = false;
+        }
+
+        uint256 aliceETHBalanceAfterNew = alice.balance;
+        uint256 aliceSharesAfterNew = intermediateVault.balanceOf(alice);
+
+        vm.stopPrank();
+
+        // Both implementations should have same success/failure behavior
+        assertEq(newSuccess, referenceSuccess, "ETH deposit success/failure behavior should match");
+
+        if (referenceSuccess && newSuccess) {
+            // Compare return values
+            assertEq(newResult, referenceResult, "ETH deposit return values should be equal");
+
+            // Compare user balances after operation
+            assertEq(aliceETHBalanceAfterNew, aliceETHBalanceAfterReference, "Alice ETH balances should be equal");
+            assertEq(aliceSharesAfterNew, aliceSharesAfterReference, "Alice shares from ETH deposit should be equal");
+        }
     }
 }

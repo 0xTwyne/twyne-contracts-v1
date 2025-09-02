@@ -89,8 +89,8 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
     /// @return vault address of the newly created collateral vault
     function createCollateralVault(address _asset, address _targetVault, uint _liqLTV)
         external
-        whenNotPaused
         callThroughEVC
+        whenNotPaused
         returns (address vault)
     {
         // First validate the input params

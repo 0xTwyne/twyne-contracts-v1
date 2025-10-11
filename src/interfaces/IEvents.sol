@@ -37,4 +37,5 @@ interface IEvents {
     event T_DoCall(address indexed to, uint value, bytes data);
     // LeverageOperator
     event T_LeverageUpExecuted(address indexed collateralVault);
+    event T_LeverageDownExecuted(address indexed collateralVault);
 }

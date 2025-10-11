@@ -34,6 +34,7 @@ import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/Upgradeable
 import {Address} from "openzeppelin-contracts/utils/Address.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
+import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
 
 interface EulerRouterFactory {
     function deploy(address) external returns (address);
@@ -44,10 +45,8 @@ interface EulerRouterFactory {
 contract TwyneDeployEulerIntegration is Script {
     // set asset addresses
 
-    address eulerOnchainRouter;
     address eulerUSDC;
     address eulerWETH;
-    address eulerWSTETH;
     address USDC;
     address WETH;
     address WSTETH;
@@ -83,10 +82,7 @@ contract TwyneDeployEulerIntegration is Script {
     LeverageOperator leverageOperator;
 
     address deployer;
-    address admin;
     address feeReceiver;
-    uint256 deployerKey;
-
 
     uint constant twyneLiqLTV = 0.90e4;
 
@@ -99,36 +95,30 @@ contract TwyneDeployEulerIntegration is Script {
         address oracleRouter;
         address genericFactory;
         address intermediateVault;
+        address upgrBeacon;
         address deployerExampleCollateralVault;
         address healthStatViewer;
         address leverageOperator;
+        address eulerWrapper;
     }
 
     function run() public {
         if (block.chainid == 1) { // mainnet
-            eulerOnchainRouter = 0x83B3b76873D36A28440cF53371dF404c42497136;
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
             eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
-            eulerWSTETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
+            // Euler addresses are documented at: https://docs.euler.finance/developers/contract-addresses
             eulerSwapVerifier = 0xae26485ACDDeFd486Fe9ad7C2b34169d360737c7;
             eulerSwapper = 0x2Bba09866b6F1025258542478C39720A09B728bF;
+            // Morpho addresses are documented at: https://docs.morpho.org/get-started/resources/addresses#morpho-contracts
             morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
         } else if (block.chainid == 8453) { // base
-            eulerOnchainRouter = 0x6E183458600e66047A0f4D356d9DAa480DA1CA59;
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
-            eulerWSTETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
+            // Euler addresses are documented at: https://docs.euler.finance/developers/contract-addresses
             eulerSwapVerifier = 0x30660764A7a05B84608812C8AFC0Cb4845439EEe;
             eulerSwapper = 0x0D3d0F97eD816Ca3350D627AD8e57B6AD41774df;
+            // Morpho addresses are documented at: https://docs.morpho.org/get-started/resources/addresses#morpho-contracts
             morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
-        // } else if (block.chainid == 146) { // sonic
-        //     eulerOnchainRouter = 0x231811a9574dDE19e49f72F7c1cAC3085De6971a;
-        //     eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
-        //     eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
-        //     eulerWSTETH = 0x05d57366B862022F76Fe93316e81E9f24218bBfC;
-        //     eulerSwapper = address(0); // TODO: Add Sonic swapper address
-        //     eulerSwapVerifier = address(0); // TODO: Add Sonic swap verifier address
-        //     morpho = address(0); // TODO: Add Sonic morpho address
         } else {
             revert UnknownProfile();
         }
@@ -136,17 +126,12 @@ contract TwyneDeployEulerIntegration is Script {
         permit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
         USDC = IEVault(eulerUSDC).asset();
         WETH = IEVault(eulerWETH).asset();
-        WSTETH = IEVault(eulerWSTETH).asset();
 
         vm.label(USDC, "USDC");
         vm.label(eulerWETH, "eulerWETH");
         vm.label(eulerUSDC, "eulerUSDC");
-        vm.label(eulerWSTETH, "eulerWSTETH");
         vm.label(permit2, "permit2");
-        vm.label(eulerOnchainRouter, "eulerOnchainRouter");
-        admin = vm.envAddress("ADMIN_ETH_ADDRESS");
         feeReceiver = vm.envAddress("DEPLOYER_ADDRESS");
-        deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         deployer = vm.envAddress("DEPLOYER_ADDRESS");
 
         // if (vm.envBool("PROD")) { // Run script against on-chain RPC
@@ -186,6 +171,7 @@ contract TwyneDeployEulerIntegration is Script {
         result = vm.serializeAddress("twyneAddresses", "oracleRouter", Addresses.oracleRouter);
         result = vm.serializeAddress("twyneAddresses", "GenericFactory", Addresses.genericFactory);
         result = vm.serializeAddress("twyneAddresses", "intermediateVault", Addresses.intermediateVault);
+        result = vm.serializeAddress("twyneAddresses", "upgrBeacon", Addresses.upgrBeacon);
         result = vm.serializeAddress("twyneAddresses", "deployerExampleCollateralVault", Addresses.deployerExampleCollateralVault);
         result = vm.serializeAddress("twyneAddresses", "healthStatViewer", Addresses.healthStatViewer);
         result = vm.serializeAddress("twyneAddresses", "leverageOperator", Addresses.leverageOperator);
@@ -198,7 +184,7 @@ contract TwyneDeployEulerIntegration is Script {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
-        // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
+        // Base=0.00% APY,  Kink(80.00% utilization)=6.00% APY  Max=500.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
             idealKinkInterestRate_: 600, // 6%
             linearKinkUtilizationRate_: 8000, // 80%
@@ -209,7 +195,7 @@ contract TwyneDeployEulerIntegration is Script {
         new_vault.setLiquidationCoolOffTime(1);
         new_vault.setFeeReceiver(feeReceiver);
         new_vault.setInterestFee(0); // set zero governance fee
-        new_vault.setCaps(24339, 24339); // 38 WETH supply and borrow cap
+        new_vault.setCaps(44818, 44818); // 7 WETH supply and borrow cap
 
         vaultManager.setOracleResolvedVault(address(new_vault), true);
         vaultManager.setOracleResolvedVault(_asset, true); // need to set this for recursive resolveOracle() lookup
@@ -224,7 +210,7 @@ contract TwyneDeployEulerIntegration is Script {
     }
 
     function evkStuff() public {
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast(deployer);
         evc = new EthereumVaultConnector();
         vm.label(address(evc), "evc");
         factory = new GenericFactory(deployer);
@@ -261,7 +247,6 @@ contract TwyneDeployEulerIntegration is Script {
         oracleRouter = new EulerRouter(address(evc), address(deployer));
 
         log("ethereumVaultConnector", address(evc));
-        log("eulerOnchainRouter", eulerOnchainRouter);
         log("mockBalanceTracker", balanceTracker);
         log("deployer", deployer);
         console2.log("");
@@ -278,16 +263,16 @@ contract TwyneDeployEulerIntegration is Script {
             factory = GenericFactory(0xd5e966dB359f1cB2A01280fCCBEB839Ac572CE35);
             protocolConfig = ProtocolConfig(0x3b68711EF6c1988c96CBD32d929b76cB09b579Ea);
         } else if (block.chainid == 1) {
-            oracleRouterFactory = 0x72735e5dd42EDc979c600766532eA704842CfB7b;
-            evc = EthereumVaultConnector(payable(0xC36aED7b7816aA21B660a33a637a8f9B9B70ad6c));
-            factory = GenericFactory(0xd5e966dB359f1cB2A01280fCCBEB839Ac572CE35);
-            protocolConfig = ProtocolConfig(0x3b68711EF6c1988c96CBD32d929b76cB09b579Ea);
+            oracleRouterFactory = 0x928B7D2ccEa72268a051a2807f7fd9585861Cad9;
+            evc = EthereumVaultConnector(payable(0xef39D6493884C4C84D38a4bFF879Ce16CEdE702a));
+            factory = GenericFactory(0xB5Eb1d005e389Bef38161691E2083b4d86FF647a);
+            protocolConfig = ProtocolConfig(0xFF06F28cf0c44Cf1E8F03E6835bB2F3a2a752C5C);
         } else {
             console2.log("Only supports Base and mainnet right now");
             revert UnknownProfile();
         }
 
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast(deployer);
         protocolConfig.setInterestFeeRange(0, 0); // set fee range to zero
         protocolConfig.setProtocolFeeShare(0); // set protocol fee to zero
         oracleRouter = EulerRouter(EulerRouterFactory(oracleRouterFactory).deploy(deployer));
@@ -295,7 +280,7 @@ contract TwyneDeployEulerIntegration is Script {
     }
 
     function twyneStuff() public {
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast(deployer);
 
         // Deploy general Twyne contracts
 
@@ -326,6 +311,7 @@ contract TwyneDeployEulerIntegration is Script {
         eulerCollateralVaultImpl = address(new EulerCollateralVault(address(evc), eulerUSDC));
 
         healthViewer = new HealthStatViewer();
+        vm.label(address(healthViewer), "healthViewer");
 
         // Deploy LeverageOperator
         leverageOperator = new LeverageOperator(
@@ -337,14 +323,18 @@ contract TwyneDeployEulerIntegration is Script {
         );
         vm.label(address(leverageOperator), "leverageOperator");
 
+        EulerWrapper eulerWrapper = new EulerWrapper(address(evc), WETH);
+        vm.label(address(eulerWrapper), "eulerWrapper");
+
         // Change ownership of EVK deploy contracts
         oracleRouter.transferGovernance(address(vaultManager));
 
-        collateralVaultFactory.setBeacon(eulerUSDC, address(new UpgradeableBeacon(eulerCollateralVaultImpl, deployer)));
+        address upgradeableBeacon = address(new UpgradeableBeacon(eulerCollateralVaultImpl, deployer));
+        collateralVaultFactory.setBeacon(eulerUSDC, address(upgradeableBeacon));
         collateralVaultFactory.setVaultManager(address(vaultManager));
 
         vaultManager.setOracleRouter(address(oracleRouter));
-        vaultManager.setMaxLiquidationLTV(eulerWETH, 0.93e4);
+        vaultManager.setMaxLiquidationLTV(eulerWETH, 0.94e4);
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newIntermediateVault(eulerWETH, address(oracleRouter), USD);
@@ -385,9 +375,11 @@ contract TwyneDeployEulerIntegration is Script {
         log("Twyne EulerRouter_oracle", address(oracleRouter));
         log("genericFactory", address(factory));
         log("eeWETH_intermediate_vault", address(eeWETH_intermediate_vault));
+        log("upgradeable beacon", address(upgradeableBeacon));
         log("deployer_collateral_vault", address(deployer_collateral_vault));
         log("healthViewer", address(healthViewer));
         log("leverageOperator", address(leverageOperator));
+        log("eulerWrapper", address(eulerWrapper));
 
         // Store the variables to be saved in TwyneAddresses output file
         TwyneAddresses memory twyneAddresses;
@@ -396,9 +388,11 @@ contract TwyneDeployEulerIntegration is Script {
         twyneAddresses.oracleRouter = address(oracleRouter);
         twyneAddresses.genericFactory = address(factory);
         twyneAddresses.intermediateVault = address(eeWETH_intermediate_vault);
+        twyneAddresses.upgrBeacon = address(upgradeableBeacon);
         twyneAddresses.deployerExampleCollateralVault = address(deployer_collateral_vault);
         twyneAddresses.healthStatViewer = address(healthViewer);
         twyneAddresses.leverageOperator = address(leverageOperator);
+        twyneAddresses.eulerWrapper = address(eulerWrapper);
         string memory serializedTwyneAddresses = serializeTwyneAddresses(twyneAddresses);
 
         vm.writeJson(serializedTwyneAddresses, "./TwyneAddresses_output.json");

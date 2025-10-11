@@ -5,6 +5,8 @@ pragma solidity ^0.8.28;
 import {EulerTestBase, console2} from "./EulerTestBase.t.sol";
 import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
+import {MockChainlinkOracle} from "test/mocks/MockChainlinkOracle.sol";
+import {ChainlinkOracle} from "euler-price-oracle/src/adapter/chainlink/ChainlinkOracle.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
@@ -409,5 +411,128 @@ contract EulerFrontendTests is EulerTestBase {
             deadline,
             multicallData
         );
+    }
+
+    // Test 1-click leverage functionality
+    function test_e_1clickLeverageBatch() public noGasMetering returns (EulerCollateralVault) {
+        e_creditDeposit(eulerWETH);
+        MockSwapper mockSwapper = new MockSwapper();
+        vm.etch(eulerSwapper, address(mockSwapper).code);
+
+        // Step 1: Create collateral vault for user
+        vm.startPrank(alice);
+        EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV
+            })
+        );
+
+        // Approve leverage operator to take user's collateral
+        IERC20(eulerWETH).approve(address(leverageOperator), type(uint).max);
+        IERC20(WETH).approve(address(leverageOperator), type(uint).max);
+
+        uint userUnderlyingCollateralAmount = 1 ether; // User provides 1 WETH
+        uint userCollateralAmount = 1 ether; // User provides 1 eulerWETH
+        uint flashloanAmount = 20000 * 1e6; // Flashloan 20,000 USDC
+        uint minAmountOutWETH = 20 ether; // Expect at least 20 WETH from swap
+        uint deadline = block.timestamp + 10; // deadline of the swap quote
+
+        deal(WETH, eulerSwapper, minAmountOutWETH + 10);
+        // Prepare swap data for the swapper. This is mock data.
+        bytes memory swapData = abi.encodeCall(MockSwapper.swap, (USDC, WETH, flashloanAmount, minAmountOutWETH, eulerWETH));
+        bytes[] memory multicallData = new bytes[](1);
+        // Swapper.multicall is called with `multicallData`
+        multicallData[0] = swapData;
+
+        // Execute leverage through EVC batch with operator setup
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+
+        // Item 0: Enable operator
+        items[0] = IEVC.BatchItem({
+            targetContract: address(evc),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(evc.setAccountOperator, (alice, address(leverageOperator), true))
+        });
+
+        // Item 1: Execute leverage operation
+        items[1] = IEVC.BatchItem({
+            targetContract: address(leverageOperator),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(leverageOperator.executeLeverage, (
+                address(alice_collateral_vault),
+                userUnderlyingCollateralAmount,
+                userCollateralAmount,
+                flashloanAmount,
+                minAmountOutWETH,
+                deadline,
+                multicallData
+            ))
+        });
+
+        // Item 2: Disable operator
+        items[2] = IEVC.BatchItem({
+            targetContract: address(evc),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(evc.setAccountOperator, (alice, address(leverageOperator), false))
+        });
+
+        evc.batch(items);
+        return alice_collateral_vault;
+    }
+
+    function test_1clickDeleverage() public noGasMetering {
+        EulerCollateralVault alice_collateral_vault = test_e_1clickLeverageBatch();
+
+        // Now test deleverage
+        uint flashloanAmount = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(); // WETH flashloan for deleverage
+        uint maxDebt = 0; // Maximum remaining debt after deleverage
+        uint withdrawCollateralAmount = flashloanAmount; // Amount of collateral to withdraw
+
+        uint minAmountOutUSDC = alice_collateral_vault.maxRepay();
+        deal(USDC, eulerSwapper, minAmountOutUSDC + 10);
+
+        // Create deleverage swap data
+        bytes[] memory deleverageMulticallData = new bytes[](1);
+        {
+            bytes memory deleverageSwapData = abi.encodeCall(MockSwapper.swap, (WETH, USDC, flashloanAmount, minAmountOutUSDC, address(deleverageOperator)));
+            deleverageMulticallData[0] = deleverageSwapData;
+        }
+
+        // Execute deleverage
+        IEVC.BatchItem[] memory deleverageItems = new IEVC.BatchItem[](3);
+        deleverageItems[0] = IEVC.BatchItem({
+            targetContract: address(evc),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(evc.setAccountOperator, (alice, address(deleverageOperator), true))
+        });
+        deleverageItems[1] = IEVC.BatchItem({
+            targetContract: address(deleverageOperator),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(deleverageOperator.executeDeleverage, (
+                address(alice_collateral_vault),
+                flashloanAmount,
+                maxDebt,
+                withdrawCollateralAmount,
+                deleverageMulticallData
+            ))
+        });
+        deleverageItems[2] = IEVC.BatchItem({
+            targetContract: address(evc),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(evc.setAccountOperator, (alice, address(deleverageOperator), false))
+        });
+
+        evc.batch(deleverageItems);
+
+
+        vm.stopPrank();
     }
 }

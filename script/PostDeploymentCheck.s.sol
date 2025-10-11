@@ -11,11 +11,13 @@ import {ProtocolConfig} from "euler-vault-kit/ProtocolConfig/ProtocolConfig.sol"
 import {USD} from "euler-price-oracle/test/utils/EthereumAddresses.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IEVault, IERC20} from "euler-vault-kit/EVault/IEVault.sol";
-import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_SKIM, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
+import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
+import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
+import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 
 contract TestBeaconImpl {
     function kjarjnwr() external pure returns (uint) {
@@ -27,7 +29,6 @@ contract TestBeaconImpl {
 /// @notice Comprehensive post-deployment verification for Twyne contracts
 contract PostDeploymentCheck is Script {
     // set asset addresses
-    address eulerOnchainRouter;
     address eulerWETH;
     address eulerUSDC;
     address eulerBTC;
@@ -47,6 +48,8 @@ contract PostDeploymentCheck is Script {
     IEVault intermediateVault;
     EulerCollateralVault deployer_collateral_vault;
     HealthStatViewer healthViewer;
+    EulerWrapper eulerWrapper;
+    LeverageOperator leverageOperator;
 
     address admin;
 
@@ -54,35 +57,19 @@ contract PostDeploymentCheck is Script {
 
     error UnknownProfile();
 
-    struct TwyneAddresses {
-        address genericFactory;
-        address collateralVaultFactory;
-        address deployerExampleCollateralVault;
-        address healthStatViewer;
-        address intermediateVault;
-        address oracleRouter;
-        address vaultManager;
-    }
-
     function run() public {
         if (block.chainid == 1) { // mainnet
-            eulerOnchainRouter = 0x83B3b76873D36A28440cF53371dF404c42497136;
             eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
             eulerBTC = 0x998D761eC1BAdaCeb064624cc3A1d37A46C88bA4;
             eulerwstETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
             eulerUSDS = 0x07F9A54Dc5135B9878d6745E267625BF0E206840;
         } else if (block.chainid == 8453) { // base
-            eulerOnchainRouter = 0x6E183458600e66047A0f4D356d9DAa480DA1CA59;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerBTC = 0x882018411Bc4A020A879CEE183441fC9fa5D7f8B;
             eulerwstETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
             eulerUSDS = 0x556d518FDFDCC4027A3A1388699c5E11AC201D8b;
-        } else if (block.chainid == 146) { // sonic
-            eulerOnchainRouter = 0x231811a9574dDE19e49f72F7c1cAC3085De6971a;
-            eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
-            eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
         } else {
             revert UnknownProfile();
         }
@@ -100,14 +87,17 @@ contract PostDeploymentCheck is Script {
         intermediateVault = IEVault(vm.parseJsonAddress(twyneAddressesJson, ".intermediateVault"));
         deployer_collateral_vault = EulerCollateralVault(vm.parseJsonAddress(twyneAddressesJson, ".deployerExampleCollateralVault"));
         healthViewer = HealthStatViewer(vm.parseJsonAddress(twyneAddressesJson, ".healthStatViewer"));
+        eulerWrapper = EulerWrapper(vm.parseJsonAddress(twyneAddressesJson, ".eulerWrapper"));
+        leverageOperator = LeverageOperator(vm.parseJsonAddress(twyneAddressesJson, ".leverageOperator"));
         evc = EthereumVaultConnector(payable(collateralVaultFactory.EVC()));
-        vm.label(address(eulerOnchainRouter), "eulerOnchainRouter");
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
         vm.label(address(oracleRouter), "oracleRouter");
         vm.label(address(factory), "factory");
         vm.label(address(intermediateVault), "intermediateVault");
         vm.label(address(deployer_collateral_vault), "deployer_collateral_vault");
         vm.label(address(healthViewer), "healthViewer");
+        vm.label(address(eulerWrapper), "eulerWrapper");
+        vm.label(address(leverageOperator), "leverageOperator");
         vm.label(address(evc), "evc");
 
         runAllChecks();
@@ -123,6 +113,7 @@ contract PostDeploymentCheck is Script {
         checkCollateralVaultConfiguration();
         checkOracleConfiguration();
         checkSecurityConfiguration();
+        checkLeverageOperatorConfiguration();
         checkIntegrationBetweenContracts();
         checkParameterBounds();
         console2.log("All checks complete, looks good!");
@@ -136,6 +127,8 @@ contract PostDeploymentCheck is Script {
         require(address(intermediateVault) != address(0), "Intermediate vault not deployed");
         require(address(deployer_collateral_vault) != address(0), "Collateral vault not deployed");
         require(address(healthViewer) != address(0), "HealthStatViewer not deployed");
+        require(address(eulerWrapper) != address(0), "EulerWrapper not deployed");
+        require(address(leverageOperator) != address(0), "LeverageOperator not deployed");
 
         // Check that contracts have code
         require(address(collateralVaultFactory).code.length > 0, "CollateralVaultFactory has no code");
@@ -144,6 +137,8 @@ contract PostDeploymentCheck is Script {
         require(address(intermediateVault).code.length > 0, "Intermediate vault has no code");
         require(address(deployer_collateral_vault).code.length > 0, "Collateral vault has no code");
         require(address(healthViewer).code.length > 0, "HealthStatViewer has no code");
+        require(address(eulerWrapper).code.length > 0, "EulerWrapper has no code");
+        require(address(leverageOperator).code.length > 0, "LeverageOperator has no code");
     }
 
     /// @notice Verify ownership and governance setup
@@ -188,7 +183,7 @@ contract PostDeploymentCheck is Script {
         address collateralAsset = intermediateVault.asset();
         // Check max liquidation LTV for eulerWETH
         uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(collateralAsset);
-        require(maxLiqLTV == 0.93e4, "Max liquidation LTV not set correctly");
+        require(maxLiqLTV == 0.94e4, "Max liquidation LTV not set correctly");
         require(maxLiqLTV > twyneLiqLTV, "Max liquidation LTV should be greater than twyne LTV");
 
         // Check external liquidation buffer
@@ -313,6 +308,8 @@ contract PostDeploymentCheck is Script {
         require(address(collateralVaultFactory.EVC()) == address(evc), "CollateralVaultFactory-EVC integration broken");
         require(address(intermediateVault.EVC()) == address(evc), "Intermediate vault-EVC integration broken");
         require(address(deployer_collateral_vault.EVC()) == address(evc), "CollateralVault-EVC integration broken");
+        require(address(eulerWrapper.EVC()) == address(evc), "EulerWrapper-EVC integration broken");
+        require(address(leverageOperator.EVC()) == address(evc), "LeverageOperator-EVC integration broken");
     }
 
     /// @notice Verify parameter bounds and limits
@@ -328,5 +325,14 @@ contract PostDeploymentCheck is Script {
 
         // Check LTV values
         require(deployer_collateral_vault.twyneLiqLTV() <= vaultManager.maxTwyneLTVs(intermediateVault.asset()), "Collateral vault LTV exceeds maximum");
+    }
+
+    /// @notice Verify LeverageOperator configuration
+    function checkLeverageOperatorConfiguration() internal view {
+        require(address(leverageOperator.COLLATERAL_VAULT_FACTORY()) == address(collateralVaultFactory), "LeverageOperator CollateralVaultFactory incorrect");
+
+        require(leverageOperator.SWAPPER() != address(0), "LeverageOperator SWAPPER not set");
+        require(leverageOperator.SWAP_VERIFIER() != address(0), "LeverageOperator SWAP_VERIFIER not set");
+        require(address(leverageOperator.MORPHO()) != address(0), "LeverageOperator MORPHO not set");
     }
 }

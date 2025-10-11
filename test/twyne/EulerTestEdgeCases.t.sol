@@ -21,7 +21,9 @@ import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.so
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
 import {MockCollateralVault} from "test/mocks/MockCollateralVault.sol";
+import {MockChainlinkOracle} from "test/mocks/MockChainlinkOracle.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
+import {ChainlinkOracle} from "euler-price-oracle/src/adapter/chainlink/ChainlinkOracle.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
 import {ProtocolConfig} from "euler-vault-kit/ProtocolConfig/ProtocolConfig.sol";
 import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConnector.sol";
@@ -1436,61 +1438,192 @@ contract EulerTestEdgeCases is EulerTestBase {
         IERC20(eulerWETH).approve(address(leverageOperator), type(uint).max);
         IERC20(WETH).approve(address(leverageOperator), type(uint).max);
 
-        uint userUnderlyingCollateralAmount = 1 ether; // User provides 1 WETH
-        uint userCollateralAmount = 1 ether; // User provides 1 eulerWETH
-        uint flashloanAmount = 20000 * 1e6; // Flashloan 20,000 USDC
-        uint minAmountOutWETH = 20 ether; // Expect at least 20 WETH from swap
-        uint deadline = block.timestamp + 10; // deadline of the swap quote
+        {
+            uint userUnderlyingCollateralAmount = 1 ether; // User provides 1 WETH
+            uint userCollateralAmount = 1 ether; // User provides 1 eulerWETH
+            uint flashloanAmount = 20000 * 1e6; // Flashloan 20,000 USDC
+            uint minAmountOutWETH = 20 ether; // Expect at least 20 WETH from swap
+            uint deadline = block.timestamp + 10; // deadline of the swap quote
 
-        // Prepare swap data for the swapper
-        deal(WETH, eulerSwapper, minAmountOutWETH + 10);
-        bytes memory swapData = abi.encodeCall(MockSwapper.swap, (USDC, WETH, flashloanAmount, minAmountOutWETH, eulerWETH));
-        bytes[] memory multicallData = new bytes[](1);
-        multicallData[0] = swapData;
+            // Prepare swap data for the swapper
+            deal(WETH, eulerSwapper, minAmountOutWETH + 10);
+            bytes memory swapData = abi.encodeCall(MockSwapper.swap, (USDC, WETH, flashloanAmount, minAmountOutWETH, eulerWETH));
+            bytes[] memory multicallData = new bytes[](1);
+            multicallData[0] = swapData;
 
+            vm.expectRevert(TwyneErrors.T_CallerNotBorrower.selector);
+            leverageOperator.executeLeverage(
+                address(bob_collateral_vault),
+                userUnderlyingCollateralAmount,
+                userCollateralAmount,
+                flashloanAmount,
+                minAmountOutWETH,
+                deadline,
+                multicallData
+            );
+
+            vm.expectRevert(EVCErrors.EVC_NotAuthorized.selector);
+            leverageOperator.executeLeverage(
+                address(alice_collateral_vault),
+                userUnderlyingCollateralAmount,
+                userCollateralAmount,
+                flashloanAmount,
+                minAmountOutWETH,
+                deadline,
+                multicallData
+            );
+
+            uint256 snapshot = vm.snapshot();
+
+            // Execute leverage through EVC batch with operator setup
+            IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+
+            // Item 0: Enable operator
+            items[0] = IEVC.BatchItem({
+                targetContract: address(evc),
+                onBehalfOfAccount: address(0),
+                value: 0,
+                data: abi.encodeCall(evc.setAccountOperator, (alice, address(leverageOperator), true))
+            });
+
+            // Item 1: Execute leverage operation
+            items[1] = IEVC.BatchItem({
+                targetContract: address(leverageOperator),
+                onBehalfOfAccount: alice,
+                value: 0,
+                data: abi.encodeCall(leverageOperator.executeLeverage, (
+                    address(alice_collateral_vault),
+                    userUnderlyingCollateralAmount,
+                    userCollateralAmount,
+                    flashloanAmount,
+                    minAmountOutWETH,
+                    deadline,
+                    multicallData
+                ))
+            });
+
+            // Item 2: Disable operator
+            items[2] = IEVC.BatchItem({
+                targetContract: address(evc),
+                onBehalfOfAccount: address(0),
+                value: 0,
+                data: abi.encodeCall(evc.setAccountOperator, (alice, address(leverageOperator), false))
+            });
+
+            evc.batch(items);
+
+            assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), userCollateralAmount + userUnderlyingCollateralAmount);
+            assertEq(alice_collateral_vault.maxRepay(), flashloanAmount);
+
+            // Verify that LeverageOperator has no remaining token balances
+            assertEq(IERC20(eulerWETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerWETH");
+            assertEq(IERC20(eulerUSDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerUSDC");
+            assertEq(IERC20(WETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 WETH");
+            assertEq(IERC20(USDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 USDC");
+
+            // Restore state so we can test the direct call to executeLeverage
+            vm.revertTo(snapshot);
+
+            evc.setAccountOperator(alice, address(leverageOperator), true);
+            // Execute leverage through the operator
+            leverageOperator.executeLeverage(
+                address(alice_collateral_vault),
+                userUnderlyingCollateralAmount,
+                userCollateralAmount,
+                flashloanAmount,
+                minAmountOutWETH,
+                deadline,
+                multicallData
+            );
+
+            assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), userCollateralAmount + userUnderlyingCollateralAmount);
+            assertEq(alice_collateral_vault.maxRepay(), flashloanAmount);
+
+            // Verify that LeverageOperator has no remaining token balances
+            assertEq(IERC20(eulerWETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerWETH");
+            assertEq(IERC20(eulerUSDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerUSDC");
+            assertEq(IERC20(WETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 WETH");
+            assertEq(IERC20(USDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 USDC");
+    }
+
+        // Test deleverage functionality
+        vm.warp(block.timestamp + 1 days);
+
+        // Update oracle to avoid stale price revert
+        {
+            address configuredWETH_USD_Oracle = oracleRouter.getConfiguredOracle(WETH, USD);
+            address chainlinkFeed = ChainlinkOracle(configuredWETH_USD_Oracle).feed();
+            MockChainlinkOracle mockChainlink = new MockChainlinkOracle(WETH, USD, chainlinkFeed, 61 seconds);
+            vm.etch(configuredWETH_USD_Oracle, address(mockChainlink).code);
+
+            address configuredUSDC_USD_Oracle = oracleRouter.getConfiguredOracle(USDC, USD);
+            chainlinkFeed = ChainlinkOracle(configuredUSDC_USD_Oracle).feed();
+            mockChainlink = new MockChainlinkOracle(USDC, USD, chainlinkFeed, 61 seconds);
+            vm.etch(configuredUSDC_USD_Oracle, address(mockChainlink).code);
+        }
+
+        // Calculate deleverage amounts based on current position
+        uint borrowerCollateral = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
+        uint maxDebt = alice_collateral_vault.maxRepay() / 2;
+        uint withdrawCollateralAmount = borrowerCollateral / 2;
+        uint flashloanAmount = withdrawCollateralAmount + 1;
+
+        deal(USDC, eulerSwapper, maxDebt + 11);
+
+        // Prepare deleverage swap data
+        bytes memory deleverageSwapData = abi.encodeCall(MockSwapper.swap, (WETH, USDC, flashloanAmount, maxDebt + 1, address(deleverageOperator)));
+        bytes[] memory deleverageMulticallData = new bytes[](1);
+        deleverageMulticallData[0] = deleverageSwapData;
+
+        IERC20 targetAsset = IERC20(alice_collateral_vault.targetAsset());
+        uint aliceTargetAssetBal = targetAsset.balanceOf(alice);
+        IERC20 underlyingCollateralAsset = IERC20(IEVault(alice_collateral_vault.asset()).asset());
+        uint aliceUnderlyingCollateralBal = underlyingCollateralAsset.balanceOf(alice);
+
+        // Test unauthorized deleverage attempts
+        vm.startPrank(bob);
         vm.expectRevert(TwyneErrors.T_CallerNotBorrower.selector);
-        leverageOperator.executeLeverage(
-            address(bob_collateral_vault),
-            userUnderlyingCollateralAmount,
-            userCollateralAmount,
+        deleverageOperator.executeDeleverage(
+            address(alice_collateral_vault),
             flashloanAmount,
-            minAmountOutWETH,
-            deadline,
-            multicallData
+            maxDebt,
+            withdrawCollateralAmount,
+            deleverageMulticallData
         );
+        vm.stopPrank();
 
+        vm.startPrank(alice);
+        // Test deleverage without operator permission
         vm.expectRevert(EVCErrors.EVC_NotAuthorized.selector);
-        leverageOperator.executeLeverage(
+        deleverageOperator.executeDeleverage(
             address(alice_collateral_vault),
-            userUnderlyingCollateralAmount,
-            userCollateralAmount,
             flashloanAmount,
-            minAmountOutWETH,
-            deadline,
-            multicallData
+            maxDebt,
+            withdrawCollateralAmount,
+            deleverageMulticallData
         );
 
-        evc.setAccountOperator(alice, address(leverageOperator), true);
-        // Execute leverage through the operator
-        leverageOperator.executeLeverage(
+        // Enable operator and execute deleverage
+        evc.setAccountOperator(alice, address(deleverageOperator), true);
+        deleverageOperator.executeDeleverage(
             address(alice_collateral_vault),
-            userUnderlyingCollateralAmount,
-            userCollateralAmount,
             flashloanAmount,
-            minAmountOutWETH,
-            deadline,
-            multicallData
+            maxDebt,
+            withdrawCollateralAmount,
+            deleverageMulticallData
         );
+        evc.setAccountOperator(alice, address(deleverageOperator), false);
 
-        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), userCollateralAmount + userUnderlyingCollateralAmount);
-        assertEq(alice_collateral_vault.maxRepay(), flashloanAmount);
+        assertLe(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), maxDebt, "Debt not fully repaid");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), borrowerCollateral / 2, "Collateral not fully withdrawn");
 
-        // Verify that LeverageOperator has no remaining token balances
-        assertEq(IERC20(eulerWETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerWETH");
-        assertEq(IERC20(eulerUSDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerUSDC");
-        assertEq(IERC20(WETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 WETH");
-        assertEq(IERC20(USDC).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 USDC");
+        assertEq(targetAsset.balanceOf(alice), aliceTargetAssetBal);
+        assertGt(underlyingCollateralAsset.balanceOf(alice), aliceUnderlyingCollateralBal, "alice collateral balance increases");
 
+        // Check deleverageOperator has no remaining balances
+        assertEq(targetAsset.balanceOf(address(deleverageOperator)), 0, "DeleverageOperator has remaining WETH");
+        assertEq(underlyingCollateralAsset.balanceOf(address(deleverageOperator)), 0, "DeleverageOperator has remaining USDC");
 
+        vm.stopPrank();
     }
 }

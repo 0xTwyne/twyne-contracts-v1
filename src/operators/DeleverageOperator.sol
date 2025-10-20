@@ -23,7 +23,7 @@ interface ISwapper {
 
 /// @title DeleverageOperator
 /// @notice Operator contract for executing 1-click deleverage operations on collateral vaults
-/// @dev Uses Morpho flashloans to enable uninwinding in  operations
+/// @dev Uses Morpho flashloans to enable unwinding operations
 contract DeleverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEvents {
     using SafeERC20 for IERC20;
 
@@ -42,9 +42,9 @@ contract DeleverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEven
         COLLATERAL_VAULT_FACTORY = CollateralVaultFactory(_collateralVaultFactory);
     }
 
-    /// @notice Execute a leverage operation on a collateral vault
+    /// @notice Execute a deleverage operation on a collateral vault
     /// @dev This function executes the following steps:
-    /// 1. Takes underlying collateral (like WSTETH) flashloan from Moprho: asset received in this contract.
+    /// 1. Takes underlying collateral (like WSTETH) flashloan from Morpho: asset received in this contract.
     /// 2. Transfer flashloaned amount to swapper.
     /// 3. Swapper.multicall is called which swaps flashloaned amount to target asset. Swap should transfer target asset to this contract.
     ///    optional: multicall also sweeps underlying collateral asset to this contract.
@@ -115,7 +115,7 @@ contract DeleverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEven
         IERC20(underlyingCollateral).safeTransfer(SWAPPER, amount);
 
         // Step 2: Execute swap underlying collateral -> target asset through multicall.
-        // This contract receives the underlying collateral.
+        // This contract receives the target asset.
         ISwapper(SWAPPER).multicall(swapData);
 
         address targetVault = EulerCollateralVault(collateralVault).targetVault();
@@ -125,18 +125,15 @@ contract DeleverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEven
         IERC20(targetAsset).forceApprove(targetVault, debtToRepay);
         IEVault(targetVault).repay(debtToRepay, collateralVault);
 
-        require(IEVault(targetVault).debtOf(collateralVault) <= maxDebt, T_DebtMoreThanMin());
+        require(IEVault(targetVault).debtOf(collateralVault) <= maxDebt, T_DebtMoreThanMax());
 
         // Step 4: Withdraw collateral
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
-        // Deposit all airdropped collateral to collateral vault
-        items[0] = IEVC.BatchItem({
+        IEVC(evc).call({
             targetContract: collateralVault,
             onBehalfOfAccount: user,
             value: 0,
             data: abi.encodeCall(CollateralVaultBase.redeemUnderlying, (withdrawCollateralAmount, address(this)))
         });
-        IEVC(evc).batch(items);
 
         // Step 5: Approve Morpho to take repayment
         IERC20(underlyingCollateral).forceApprove(address(MORPHO), amount);

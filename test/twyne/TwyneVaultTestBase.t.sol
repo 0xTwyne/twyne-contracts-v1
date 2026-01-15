@@ -156,13 +156,13 @@ contract TwyneVaultTestBase is AssertionsCustomTypes, Test {
         protocolFeeReceiver = makeAddr("protocolFeeReceiver");
         evc = new EthereumVaultConnector();
         factory = new GenericFactory(admin);
-        
+
         // Deploy CollateralVaultFactory implementation
         CollateralVaultFactory factoryImpl = new CollateralVaultFactory(address(evc));
-        
+
         // Create initialization data for CollateralVaultFactory
         bytes memory initData = abi.encodeCall(CollateralVaultFactory.initialize, (admin));
-        
+
         // Deploy CollateralVaultFactory proxy
         ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), initData);
         collateralVaultFactory = CollateralVaultFactory(payable(address(factoryProxy)));

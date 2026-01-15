@@ -13,6 +13,8 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 
 gas_reports = ["*"]
 
+[lint]
+lint_on_build = false
 
 [profile.default.fmt]
 line_length = 120

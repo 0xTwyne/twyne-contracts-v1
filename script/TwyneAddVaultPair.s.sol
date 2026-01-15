@@ -19,14 +19,13 @@ import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/Upgradeable
 /// @title TwyneAddVaultPair
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @dev This script adds a new vault pair to the Twyne protocol.
-///      It requires the addresses of the collateral and target Euler vaults to be set as environment variables.
-///      COLLATERAL_ASSET_EULER_VAULT: The address of the Euler vault for the collateral asset.
-///      TARGET_ASSET_EULER_VAULT: The address of the Euler vault for the target asset.
+///      It requires the addresses of the admin to be set as environment variables.
+///      ADMIN_ETH_ADDRESS: The address of the contracts admin.
+///      DEPLOYER_ADDRESS: The address of the deployer.
 ///      It reads the deployed Twyne contract addresses from `TwyneAddresses_output.json`.
-///      PHASE: Set to 0 for contract deployments, 1 configuring deployed contracts.
+///      PHASE: Set to 0 for contract deployments, 1 configuring deployed contracts, 2 to verify configuration.
 contract TwyneAddVaultPair is BatchScript {
-    address SAFE = 0x8f822A1b550733822bCD4681B44373552c46f940; // set SAFE address
-    uint PHASE = 10; // this will revert, intentionally set this way to make the deployer explicitly set this value
+    uint PHASE = 2; // this will revert, intentionally set this way to make the deployer explicitly set this value
 
     // Contract addresses loaded from JSON
     CollateralVaultFactory collateralVaultFactory;
@@ -39,42 +38,45 @@ contract TwyneAddVaultPair is BatchScript {
     address eulerBTC;
     address eulerwstETH;
     address eulerUSDS;
+    address eulerUSDT;
+    address deployer;
+    address SAFE;
 
     uint16 supplyCap;
-
-    uint256 deployerKey;
-
 
     error UnknownProfile();
     error InvalidCollateral();
     error InvalidPhase();
 
-    function run() public isBatch(SAFE) {
+    function run() public {
         if (block.chainid == 1) {
             eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
             eulerBTC = 0x998D761eC1BAdaCeb064624cc3A1d37A46C88bA4;
             eulerwstETH = 0xbC4B4AC47582c3E38Ce5940B80Da65401F4628f1;
             eulerUSDS = 0x07F9A54Dc5135B9878d6745E267625BF0E206840;
+            eulerUSDT = 0x313603FA690301b0CaeEf8069c065862f9162162;
         } else if (block.chainid == 8453) {
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerBTC = 0x882018411Bc4A020A879CEE183441fC9fa5D7f8B;
             eulerwstETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
             eulerUSDS = 0x556d518FDFDCC4027A3A1388699c5E11AC201D8b;
+            eulerUSDT = 0x313603FA690301b0CaeEf8069c065862f9162162; // No USDT support on Base
         } else {
             revert UnknownProfile();
         }
 
-        require (PHASE <= 1, InvalidPhase());
+        require (PHASE <= 2, InvalidPhase());
 
-        deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        deployer = vm.envAddress("DEPLOYER_ADDRESS"); // set deployer EOA address
+        SAFE = vm.envAddress("ADMIN_ETH_ADDRESS"); // set SAFE address
 
         // TODO Update these assets to meet needs
         // assets should be eTokens (not the base asset)
-        address collateralAssetVault = eulerWETH;
-        address targetAssetVault = eulerUSDS;
-        supplyCap = 24339;
+        address collateralAssetVault = eulerwstETH;
+        address targetAssetVault = eulerWETH;
+        supplyCap = 44818; // supplyCap is only relevant if deploying new intermediate vault
 
         loadTwyneAddresses();
 
@@ -82,11 +84,11 @@ contract TwyneAddVaultPair is BatchScript {
             phase0(collateralAssetVault, targetAssetVault);
         } else if (PHASE == 1) {
             phase1(collateralAssetVault, targetAssetVault);
+        } else if (PHASE == 2) {
+            phase2(collateralAssetVault, targetAssetVault);
         } else {
             revert("PHASE not set correctly");
         }
-
-        executeBatch(PHASE == 1);
     }
 
     function loadTwyneAddresses() internal {
@@ -109,18 +111,16 @@ contract TwyneAddVaultPair is BatchScript {
         verifyeVault(_collateralAsset);
         verifyeVault(_targetAsset);
 
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast(deployer);
 
         // 1. Deploy new intermediate vault for the collateral asset
         IEVault new_intermediate_vault;
-        bool newVaultCreated = false;
         // if intermediate vault already exists, use it. Otherwise, create a new one.
         try twyneVaultManager.getIntermediateVault(_collateralAsset) returns (address vault) {
             new_intermediate_vault = IEVault(vault);
         // if revert encountered because the vault does not exist, create new intermediate vault
         } catch {
             new_intermediate_vault = newIntermediateVault(_collateralAsset, address(oracleRouter), USD);
-            newVaultCreated = true;
         }
 
         // 4. Set up CrossAdapter for external liquidations
@@ -148,6 +148,7 @@ contract TwyneAddVaultPair is BatchScript {
         string memory deploymentJson = "deployment";
         vm.serializeAddress(deploymentJson, "newUpgrBeacon", address(newUpgrBeacon));
         vm.serializeAddress(deploymentJson, "crossAdapterOracle", address(crossAdapterOracle));
+        vm.serializeAddress(deploymentJson, "intermediateVault", address(new_intermediate_vault));
 
         // Add additional metadata
         vm.serializeAddress(deploymentJson, "collateralAsset", _collateralAsset);
@@ -157,22 +158,96 @@ contract TwyneAddVaultPair is BatchScript {
         vm.serializeUint(deploymentJson, "timestamp", block.timestamp);
         string memory finalJson = vm.serializeUint(deploymentJson, "chainId", block.chainid);
 
+        string memory collateralSymbol = IEVault(_collateralAsset).symbol();
+        string memory targetSymbol = IEVault(_targetAsset).symbol();
+
         // Write to file
-        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), ".json");
+        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), "_", collateralSymbol, "_", targetSymbol, ".json");
         vm.writeJson(finalJson, fileName);
 
         console2.log("Deployment data serialized to:", fileName);
     }
 
     // Phase 1: Configure the contracts deployed in phase 0 and 1
-    function phase1(address _collateralAsset, address _targetAsset) internal {
+    function phase1(address _collateralAsset, address _targetAsset) internal isBatch(SAFE) {
         // Read deployment data from phase 0
-        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), ".json");
+        string memory collateralSymbol = IEVault(_collateralAsset).symbol();
+        string memory targetSymbol = IEVault(_targetAsset).symbol();
+        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), "_", collateralSymbol, "_", targetSymbol, ".json");
         string memory json = vm.readFile(fileName);
 
         // Parse beacon and oracle addresses
         address newBeacon = abi.decode(vm.parseJson(json, ".newUpgrBeacon"), (address));
         address crossAdapterOracle = abi.decode(vm.parseJson(json, ".crossAdapterOracle"), (address));
+
+        // Get the intermediate vault that should have been created in phase 0
+        IEVault new_intermediate_vault;
+        bool newVaultCreated = false;
+        new_intermediate_vault = IEVault(abi.decode(vm.parseJson(json, ".intermediateVault"), (address)));
+        try twyneVaultManager.getIntermediateVault(_collateralAsset) returns (address vault) {
+            require(new_intermediate_vault == IEVault(vault), "intermediate vault address mismatch");
+        } catch {
+            newVaultCreated = true;
+        }
+
+        require(address(new_intermediate_vault) != address(0), "intermediate vault shouldn't be address(0)");
+
+        ///////////////////////////////////////
+        multisigSetup(new_intermediate_vault, _collateralAsset, _targetAsset, CrossAdapter(crossAdapterOracle), newBeacon, newVaultCreated);
+
+        executeBatch(true);
+    }
+
+    function phase2(address _collateralAddress, address _targetAsset) internal {
+        vm.startBroadcast(deployer);
+        EulerCollateralVault deployer_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _asset: _collateralAddress,
+                _targetVault: _targetAsset,
+                _liqLTV: 0.97e4
+            })
+        );
+        vm.stopBroadcast();
+
+        // claude: write deployer_collateral_vault to our json file
+        string memory collateralSymbol = IEVault(_collateralAddress).symbol();
+        string memory targetSymbol = IEVault(_targetAsset).symbol();
+        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), "_", collateralSymbol, "_", targetSymbol, ".json");
+
+        // Read existing deployment data and parse it
+        string memory existingJson = vm.readFile(fileName);
+
+        // Re-serialize all existing data plus the new deployer_collateral_vault
+        string memory deploymentJson = "deployment";
+        vm.serializeAddress(deploymentJson, "newUpgrBeacon", abi.decode(vm.parseJson(existingJson, ".newUpgrBeacon"), (address)));
+        vm.serializeAddress(deploymentJson, "crossAdapterOracle", abi.decode(vm.parseJson(existingJson, ".crossAdapterOracle"), (address)));
+        vm.serializeAddress(deploymentJson, "intermediateVault", abi.decode(vm.parseJson(existingJson, ".intermediateVault"), (address)));
+        vm.serializeAddress(deploymentJson, "collateralAsset", abi.decode(vm.parseJson(existingJson, ".collateralAsset"), (address)));
+        vm.serializeAddress(deploymentJson, "targetAsset", abi.decode(vm.parseJson(existingJson, ".targetAsset"), (address)));
+        vm.serializeAddress(deploymentJson, "underlyingTarget", abi.decode(vm.parseJson(existingJson, ".underlyingTarget"), (address)));
+        vm.serializeAddress(deploymentJson, "underlyingCollateral", abi.decode(vm.parseJson(existingJson, ".underlyingCollateral"), (address)));
+        vm.serializeUint(deploymentJson, "timestamp", abi.decode(vm.parseJson(existingJson, ".timestamp"), (uint256)));
+        vm.serializeUint(deploymentJson, "chainId", abi.decode(vm.parseJson(existingJson, ".chainId"), (uint256)));
+        string memory finalJson = vm.serializeAddress(deploymentJson, "deployerExampleCollateralVault", address(deployer_collateral_vault));
+
+        // Write updated JSON back to file
+        vm.writeJson(finalJson, fileName);
+
+        console2.log("Added deployer_collateral_vault to:", fileName);
+        console2.log("Deployer collateral vault address:", address(deployer_collateral_vault));
+    }
+
+    // Phase 3: Verify the configuration of the contracts deployed in phase 0 and 1
+    function phase3(address _collateralAsset, address _targetAsset) internal view {
+        // Read deployment data from phase 0
+        string memory collateralSymbol = IEVault(_collateralAsset).symbol();
+        string memory targetSymbol = IEVault(_targetAsset).symbol();
+        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), "_", collateralSymbol, "_", targetSymbol, ".json");
+        string memory json = vm.readFile(fileName);
+
+        // Parse beacon and oracle addresses
+        address newBeacon = abi.decode(vm.parseJson(json, ".newUpgrBeacon"), (address));
+        // address crossAdapterOracle = abi.decode(vm.parseJson(json, ".crossAdapterOracle"), (address));
 
         // Get the intermediate vault that should have been created in phase 0
         IEVault new_intermediate_vault;
@@ -182,12 +257,12 @@ contract TwyneAddVaultPair is BatchScript {
             revert("Intermediate vault not found. Run phase 0 first.");
         }
 
-        require(address(new_intermediate_vault) != address(0), "intermediate vault shouldn't be address(0)");
-
-        bool newVaultCreated = new_intermediate_vault.interestRateModel() == address(0);
-
-        ///////////////////////////////////////
-        multisigSetup(new_intermediate_vault, _collateralAsset, _targetAsset, CrossAdapter(crossAdapterOracle), newBeacon, newVaultCreated);
+        // Confirm owners are all set to the proper values
+        require(collateralVaultFactory.owner() == SAFE); // do a couple sanity checks that SAFE env address is correct
+        require(twyneVaultManager.owner() == SAFE); // do a couple sanity checks that SAFE env address is correct
+        require(UpgradeableBeacon(newBeacon).owner() == SAFE, "Incorrect owner of new UpgradeableBeacon");
+        require(IEVault(new_intermediate_vault).governorAdmin() == address(twyneVaultManager), "Incorrect owner of intermediate vault");
+        console2.log("On-chain verification completed successfully");
     }
 
     function newIntermediateVault(address _asset, address _oracle, address _unitOfAccount) internal returns (IEVault) {
@@ -199,10 +274,10 @@ contract TwyneAddVaultPair is BatchScript {
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
         // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            idealKinkInterestRate_: 0, // 0%
+            linearKinkUtilizationRate_: 9e3, // 90%
+            maxInterestRate_: 2e3, // 20%
+            nonlinearPoint_: 1e17 // 10%
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
@@ -248,13 +323,13 @@ contract TwyneAddVaultPair is BatchScript {
 
             bytes memory setMaxLiquidationLTVTxn = abi.encodeCall(
                 VaultManager.setMaxLiquidationLTV,
-                (_collateralAsset, 0.93e4)
+                (_collateralAsset, 0.98e4)
             );
             addToBatch(address(twyneVaultManager), 0, setMaxLiquidationLTVTxn);
 
             bytes memory setExternalLiqBufferTxn = abi.encodeCall(
                 VaultManager.setExternalLiqBuffer,
-                (_collateralAsset, 1e4)
+                (_collateralAsset, 0.99e4)
             );
             addToBatch(address(twyneVaultManager), 0, setExternalLiqBufferTxn);
         }

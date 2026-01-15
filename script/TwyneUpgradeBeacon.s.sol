@@ -5,7 +5,6 @@ pragma solidity ^0.8.28;
 import "forge-std/Script.sol";
 import "forge-std/Vm.sol";
 import {BatchScript} from "forge-safe/src/BatchScript.sol";
-import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConnector.sol";
 import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {Vault} from "euler-vault-kit/EVault/modules/Vault.sol";
@@ -16,7 +15,6 @@ import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/Upgradeable
 /// @title TwyneUpgradeBeacon
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 contract TwyneUpgradeBeacon is BatchScript {
-    address SAFE = 0x8f822A1b550733822bCD4681B44373552c46f940; // set SAFE address
     uint PHASE = 10; // this will revert, intentionally set this way to make the deployer explicitly set this value
 
     // set asset addresses
@@ -28,14 +26,14 @@ contract TwyneUpgradeBeacon is BatchScript {
     address newCollateralVaultImpl;
     address exampleCollateralVault;
     address evc;
+    address deployer;
+    address SAFE;
 
     CollateralVaultFactory collateralVaultFactory;
 
-    uint256 deployerKey;
-
     error UnknownProfile();
 
-    function run() public isBatch(SAFE) {
+    function run() public {
         if (block.chainid == 1) { // mainnet
             eulerUSDC = 0x797DD80692c3b2dAdabCe8e30C07fDE5307D48a9;
             eulerWETH = 0xD8b27CF359b7D15710a5BE299AF6e7Bf904984C2;
@@ -55,8 +53,9 @@ contract TwyneUpgradeBeacon is BatchScript {
         vm.label(eulerWETH, "eulerWETH");
         vm.label(eulerUSDC, "eulerUSDC");
         vm.label(eulerWSTETH, "eulerWSTETH");
-        deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         loadTwyneAddresses();
+        deployer = vm.envAddress("DEPLOYER_ADDRESS"); // set deployer EOA address
+        SAFE = vm.envAddress("ADMIN_ETH_ADDRESS"); // set SAFE address
 
         console2.log("block.chainid", uint(block.chainid));
 
@@ -67,8 +66,6 @@ contract TwyneUpgradeBeacon is BatchScript {
         } else {
             revert("PHASE not set correctly");
         }
-
-        executeBatch(PHASE == 1);
     }
 
     function loadTwyneAddresses() internal {
@@ -79,7 +76,7 @@ contract TwyneUpgradeBeacon is BatchScript {
     }
 
     function phase0() internal {
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast(deployer);
 
         // Prepare the set of Euler target vaults we maintain beacons for on this chain
         address[] memory eulerTargets = new address[](4);
@@ -141,7 +138,7 @@ contract TwyneUpgradeBeacon is BatchScript {
         console2.log("Deployment data serialized to:", fileName);
     }
 
-    function phase1() public {
+    function phase1() internal isBatch(SAFE) {
         string memory fileName = string.concat("UpgradeBeaconPhase0_", vm.toString(block.chainid), ".json");
         string memory json = vm.readFile(fileName);
 
@@ -182,6 +179,8 @@ contract TwyneUpgradeBeacon is BatchScript {
                 require(implVersion == 1, "Unexpected impl version (must be 0 or 1)");
             }
         }
+
+        executeBatch(true);
     }
 
 }

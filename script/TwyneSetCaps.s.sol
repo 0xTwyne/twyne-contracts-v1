@@ -35,7 +35,6 @@ contract TwyneSetCaps is Script {
 
     address deployer;
     address admin;
-    uint256 deployerKey;
 
     error UnknownProfile();
 
@@ -48,10 +47,6 @@ contract TwyneSetCaps is Script {
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
             eulerWSTETH = 0x7b181d6509DEabfbd1A23aF1E65fD46E89572609;
-        } else if (block.chainid == 146) { // sonic
-            eulerUSDC = 0x196F3C7443E940911EE2Bb88e019Fd71400349D9;
-            eulerWETH = 0xa5cd24d9792F4F131f5976Af935A505D19c8Db2b;
-            eulerWSTETH = 0x05d57366B862022F76Fe93316e81E9f24218bBfC;
         } else {
             revert UnknownProfile();
         }
@@ -60,7 +55,6 @@ contract TwyneSetCaps is Script {
         vm.label(eulerUSDC, "eulerUSDC");
         vm.label(eulerWSTETH, "eulerWSTETH");
         admin = vm.envAddress("ADMIN_ETH_ADDRESS");
-        deployerKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         deployer = vm.envAddress("DEPLOYER_ADDRESS");
 
         productionSetup(); // sets up on-chain EVK deployment addresses from evk-periphery script
@@ -68,20 +62,14 @@ contract TwyneSetCaps is Script {
     }
 
     function productionSetup() public {
-        if (block.chainid == 8453) {
-            intermediateVault = 0x45a59e9f2574A8e454AFBA9C6aA91c8eAD66Bcdf;
-            vaultManager = 0xf7Ef58109aE78AbD5f6DEb48A4a8f12c8fbDd354;
-        } else if (block.chainid == 1) {
-            intermediateVault = 0x45a59e9f2574A8e454AFBA9C6aA91c8eAD66Bcdf;
-            vaultManager = 0xf7Ef58109aE78AbD5f6DEb48A4a8f12c8fbDd354;
-        } else {
-            console2.log("Only supports Base and mainnet right now");
-            revert UnknownProfile();
-        }
+        string memory json = vm.readFile("TwyneAddresses_output.json");
+        intermediateVault = address(vm.parseJsonAddress(json, ".intermediateVault"));
+        vaultManager = address(vm.parseJsonAddress(json, ".vaultManager"));
+
     }
 
     function updateBeacon() public {
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast(deployer);
 
         console2.log("block.chainid", uint(block.chainid));
 

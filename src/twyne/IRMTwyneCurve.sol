@@ -33,7 +33,7 @@ contract IRMTwyneCurve is IIRM {
         if (
             idealKinkInterestRate_ > maxInterestRate_
             || linearKinkUtilizationRate_ > MAXFACTOR
-            || idealKinkInterestRate_ == 0
+            // || idealKinkInterestRate_ == 0
             || linearKinkUtilizationRate_ == 0
             || maxInterestRate_ == 0
             || nonlinearPoint_ == 0

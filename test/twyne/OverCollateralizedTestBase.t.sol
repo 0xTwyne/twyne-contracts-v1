@@ -9,6 +9,7 @@ import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
+import {DeleverageOperator} from "src/operators/DeleverageOperator.sol";
 
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
@@ -50,6 +51,7 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
     IEVault eeWSTETH_intermediate_vault;
     EulerWrapper eulerWrapper;
     LeverageOperator leverageOperator;
+    DeleverageOperator deleverageOperator;
 
     uint16 maxLTVInitial;
     uint16 externalLiqBufferInitial;
@@ -190,8 +192,17 @@ contract OverCollateralizedTestBase is TwyneVaultTestBase {
             address(collateralVaultFactory)
         );
 
+        // Deploy DeleverageOperator
+        deleverageOperator = new DeleverageOperator(
+            address(evc),
+            eulerSwapper,
+            morpho,
+            address(collateralVaultFactory)
+        );
+
         // Add labels for new addresses
         vm.label(address(leverageOperator), "leverageOperator");
+        vm.label(address(deleverageOperator), "deleverageOperator");
         vm.label(eulerSwapper, "eulerSwapper");
         vm.label(eulerSwapVerifier, "eulerSwapVerifier");
         vm.label(morpho, "morpho");

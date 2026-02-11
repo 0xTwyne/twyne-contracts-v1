@@ -63,6 +63,8 @@ gas_reports = ["*"]
 # Settings for Ethereum Mainnet
 eth_rpc_url = "https://gateway.tenderly.co/public/mainnet"
 
+match-path = "test/twyne/mainnet/**"
+
 
 [profile.base]
 # Defaults
@@ -81,6 +83,7 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 gas_reports = ["*"]
 # Settings for Base network
 eth_rpc_url = "https://gateway.tenderly.co/public/base"
+match-path = "test/base/**"
 
 
 [profile.sonic]
@@ -100,3 +103,23 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 gas_reports = ["*"]
 # Settings for Sonic network
 eth_rpc_url = "https://rpc.soniclabs.com"
+match-path = "test/sonic/**"
+
+[profile.plasma]
+# Defaults
+src = "src"
+out = "out"
+libs = ["lib"]
+
+optimizer = true
+optimizer_runs = 20_000
+solc = "0.8.28"
+
+evm_version = "Cancun"
+
+fs_permissions = [{ access = "read-write", path = "./"}]
+
+gas_reports = ["*"]
+# Settings for XPL network
+eth_rpc_url = "https://plasma.drpc.org"
+match-path = "test/twyne/plasma/**"

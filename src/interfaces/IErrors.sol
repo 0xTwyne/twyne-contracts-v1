@@ -34,5 +34,5 @@ interface IErrors {
     error T_CallerNotBorrower();
     error T_CallerNotMorpho();
     error T_InvalidCollateralVault();
-    error T_DebtMoreThanMin();
+    error T_DebtMoreThanMax(); // 0xdce22b7d
 }

@@ -2,12 +2,13 @@
 
 pragma solidity ^0.8.28;
 
+import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
-import {CollateralVaultBase, SafeERC20, IERC20} from "src/twyne/CollateralVaultBase.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {SafeERC20Lib, IERC20 as IERC20_Euler} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
+import {SafeERC20, IERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 /// @title EulerCollateralVault
@@ -38,7 +39,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         address __borrower,
         uint __liqLTV,
         VaultManager __vaultManager
-    ) external initializer override {
+    ) external initializer {
         __CollateralVaultBase_init(__asset, __borrower, __liqLTV, __vaultManager);
 
         eulerEVC.enableCollateral(address(this), address(__asset)); // necessary for Euler Finance EVK borrowing
@@ -50,7 +51,24 @@ contract EulerCollateralVault is CollateralVaultBase {
 
     /// @dev increment the version for proxy upgrades
     function version() external override pure returns (uint) {
-        return 1;
+        return 2;
+    }
+
+    /// @notice Returns Euler's liquidation LTV for the given collateral asset
+    /// @param _asset The collateral asset address
+    /// @return uint The liquidation LTV in 1e4 precision
+    function _getExtLiqLTV(address _asset) internal view override returns (uint) {
+        return IEVault(targetVault).LTVLiquidation(_asset);
+    }
+
+    /// @notice Validates that the provided liqLTV is within acceptable bounds for Euler
+    /// @dev Ensures: eulerLiqLTV * buffer <= liqLTV * MAXFACTOR && liqLTV <= maxLTV
+    /// @param _liqLTV The liquidation LTV to validate (in 1e4 precision)
+    /// @param _asset The collateral asset address (used to fetch buffer, maxLTV, and Euler's LTV)
+    function _checkLiqLTV(uint _liqLTV, address _asset) internal view override {
+        uint buffer = uint(twyneVaultManager.externalLiqBuffers(_asset));
+        uint maxLTV = uint(twyneVaultManager.maxTwyneLTVs(_asset));
+        require(_getExtLiqLTV(_asset) * buffer <= _liqLTV * MAXFACTOR && _liqLTV <= maxLTV, ValueOutOfRange());
     }
 
     ///
@@ -69,7 +87,7 @@ contract EulerCollateralVault is CollateralVaultBase {
         uint vaultAssets = totalAssetsDepositedOrReserved;
         if (vaultAssets > __invariantCollateralAmount) {
             totalAssetsDepositedOrReserved = vaultAssets - intermediateVault.repay(vaultAssets - __invariantCollateralAmount, address(this));
-        } else {
+        } else if (vaultAssets < __invariantCollateralAmount) {
             totalAssetsDepositedOrReserved = vaultAssets + intermediateVault.borrow(__invariantCollateralAmount - vaultAssets, address(this));
         }
     }
@@ -110,6 +128,20 @@ contract EulerCollateralVault is CollateralVaultBase {
     // Twyne Custom Liquidation Logic
     ///
 
+    /// @notice Returns debt (B) and user collateral (C) in the intermediate vault's unit of account
+    /// @dev B = external borrow debt value from Euler's accountLiquidity
+    /// @dev C = user-owned collateral converted to unit of account via EulerRouter oracle
+    /// @return B The total debt value in unit of account
+    /// @return C The user-owned collateral value in unit of account
+    function _getBC() internal view override returns (uint, uint) {
+        (, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
+
+        uint userCollateralValue = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+            totalAssetsDepositedOrReserved - maxRelease(), asset(), IEVault(intermediateVault).unitOfAccount());
+
+        return (externalBorrowDebtValue, userCollateralValue);
+    }
+
     /// @notice perform checks to determine if this collateral vault is liquidatable
     function _canLiquidate() internal view override returns (bool) {
         // Liquidation scenario 1: If close to liquidation trigger of target asset protocol, liquidate on Twyne
@@ -145,6 +177,20 @@ contract EulerCollateralVault is CollateralVaultBase {
         return (externalBorrowDebtValue * MAXFACTOR > twyneLiqLTV * userCollateralValue);
     }
 
+    /// @notice Converts collateral value from unit of account to native collateral asset units
+    /// @dev Uses EulerRouter oracle to convert from unit of account to underlying, then to shares
+    /// @dev Returns the minimum of calculated amount and user-owned collateral
+    /// @param collateralValue The collateral value in unit of account
+    /// @return collateralAmount The collateral amount in wrapper shares
+    function _convertBaseToCollateral(uint collateralValue) internal view virtual override returns (uint collateralAmount) {
+        collateralAmount = twyneVaultManager.oracleRouter().getQuote(
+                collateralValue,
+                IEVault(intermediateVault).unitOfAccount(),
+                IEVault(asset()).asset()
+            );
+        return Math.min(totalAssetsDepositedOrReserved - maxRelease(), IEVault(asset()).convertToShares(collateralAmount));
+    }
+
     /// @notice custom balanceOf implementation
     /// @dev returns 0 on external liquidation, because:
     /// handleExternalLiquidation() sets this vault's collateral balance to 0, balanceOf is then
@@ -160,23 +206,77 @@ contract EulerCollateralVault is CollateralVaultBase {
         return _totalAssetsDepositedOrReserved - maxRelease();
     }
 
-    /// @notice splits remaining collateral between liquidator, intermediate vault and borrow
+    /// @notice Splits remaining collateral after external liquidation (whitepaper Section 6.3.1)
+    /// @dev After external protocol liquidates the position, remaining collateral is split three ways:
+    ///
+    /// 1. C_LP (releaseAmount) → returned to intermediate vault for CLP (credit liquidity provider)
+    /// 2. borrowerClaim → returned to borrower based on dynamic incentive model
+    /// 3. liquidatorReward → goes to liquidator as compensation for handling the liquidation
+    ///
+    /// The split follows these steps:
+    /// Step 1: Calculate user collateral = B_ext / λ̃^max_t (debt at max Twyne LTV)
+    ///   - This is the minimum collateral needed to cover the external debt at maximum LTV
+    ///   - Capped by actual remaining collateral balance
+    ///
+    /// Step 2: Calculate C_LP = min(remaining collateral after user portion, maxRelease)
+    ///   - CLP gets back their reserved portion, up to what's available
+    ///
+    /// Step 3: Remaining collateral (C_new = balance - C_LP) is split between borrower and liquidator
+    ///   - Uses collateralForBorrower(B, C_new) which applies dynamic incentive i(λ_t)
+    ///   - Liquidator gets: C_new - borrowerClaim
+    ///
+    /// @param _collateralBalance Total remaining collateral after external liquidation
+    /// @param _maxRepay Maximum debt that can be repaid (B_ext in target asset units)
+    /// @param _maxRelease Maximum collateral that can be released to CLP
+    /// @return liquidatorReward Collateral going to liquidator
+    /// @return releaseAmount Collateral returning to intermediate vault (C_LP)
+    /// @return borrowerClaim Collateral returning to borrower
     function splitCollateralAfterExtLiq(uint _collateralBalance, uint _maxRepay, uint _maxRelease) internal view returns (uint, uint, uint) {
         address __asset = asset();
-        uint liquidatorReward;
 
-        if (_maxRepay > 0) {
-            liquidatorReward = twyneVaultManager.oracleRouter().getQuote(
-                _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(__asset),
-                targetAsset,
-                IEVault(__asset).asset()
-            );
-
-            liquidatorReward = Math.min(_collateralBalance, IEVault(__asset).convertToShares(liquidatorReward));
+        if (_maxRepay == 0) {
+            uint _releaseAmount = Math.min(_collateralBalance, _maxRelease);
+            uint _borrowerClaim = _collateralBalance - _releaseAmount;
+            return (0, _releaseAmount, _borrowerClaim);
         }
 
-        uint releaseAmount = Math.min(_collateralBalance - liquidatorReward, _maxRelease);
-        uint borrowerClaim = _collateralBalance - releaseAmount - liquidatorReward;
+        // Step 1: Calculate user's portion of collateral (C_temp)
+        // userCollateral = B_ext / λ̃^max_t (converted to collateral asset units)
+        // This represents the collateral value needed to cover debt at max Twyne LTV
+        // Convert _maxRepay / maxTwyneLTV from targetAsset to collateral underlying
+        EulerRouter oracle = twyneVaultManager.oracleRouter();
+        uint userCollateral = oracle.getQuote(
+            _maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(__asset),
+            targetAsset,
+            IEVault(__asset).asset()
+        );
+
+        // Convert to collateral and cap by available balance
+        userCollateral = Math.min(_collateralBalance, IEVault(__asset).convertToShares(userCollateral));
+
+        // Step 2: Calculate CLP gets min(C_left - C_temp, C_LP^old)
+        // This is the amount intermediate vault gets back
+        uint releaseAmount = Math.min(_collateralBalance - userCollateral, _maxRelease);
+
+        // Step 3: Calculate C_new which is C_left - CLP.
+        // Collateral to be split between borrower and liquidator
+        userCollateral = _collateralBalance - releaseAmount;
+
+        // Step 3: Split userCollateral between borrower and liquidator using dynamic incentive
+        // Calculate userCollateral in USD
+        uint C_new = oracle.getQuote(
+                userCollateral,
+                __asset,
+                IEVault(__asset).unitOfAccount()
+            );
+
+        // borrow amount in USD
+        (, uint B) = IEVault(targetVault).accountLiquidity(address(this), true);
+
+        // Apply dynamic incentive model: borrower gets collateralForBorrower(B, C_new)
+        // Liquidator gets the remainder as reward for handling external liquidation
+        uint borrowerClaim = collateralForBorrower(B, C_new);
+        uint liquidatorReward = userCollateral - borrowerClaim;
 
         return (liquidatorReward, releaseAmount, borrowerClaim);
     }

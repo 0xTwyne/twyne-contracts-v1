@@ -19,8 +19,13 @@ contract BridgeHookTarget is IErrors {
         return this.isHookTarget.selector;
     }
 
-    function borrow(uint /*amount*/, address receiver) external view {
-        require(collateralVaultFactory.isCollateralVault(receiver), ReceiverNotCollateralVault());
+    function borrow(uint /*amount*/, address /*receiver*/) external view {
+        // Extract caller from the end of calldata (appended by invokeHookTarget)
+        address actualCaller;
+        assembly {
+            actualCaller := shr(96, calldataload(sub(calldatasize(), 20)))
+        }
+        require(collateralVaultFactory.isCollateralVault(actualCaller), CallerNotCollateralVault());
     }
 
     function liquidate(address violator, address /*collateral*/, uint /*repayAssets*/, uint /*minYieldBalance*/) external view {

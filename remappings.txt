@@ -5,3 +5,7 @@ permit2/=lib/euler-vault-kit/lib/permit2/
 forge-std/=lib/forge-std/src/
 openzeppelin-contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/
 openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/
+aave-v3/=lib/aave-v3-origin/src/contracts/
+solidity-utils/=lib/aave-v3-origin/lib/solidity-utils/src/
+lib/aave-v3-origin/:openzeppelin-contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/
+lib/aave-v3-origin/:openzeppelin-contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/

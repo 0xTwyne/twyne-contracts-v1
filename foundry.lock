@@ -1,0 +1,17 @@
+{
+  "lib/euler-price-oracle": {
+    "rev": "f52cb43b587c7fa90a7e722d52698003451feb62"
+  },
+  "lib/euler-vault-kit": {
+    "rev": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"
+  },
+  "lib/forge-safe": {
+    "rev": "2a9bca10d8a30c7740a5de5d2a8a4bc9b10ef76e"
+  },
+  "lib/forge-std": {
+    "rev": "3b20d60d14b343ee4f908cb8079495c07f5e8981"
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "3d5fa5c24c411112bab47bec25cfa9ad0af0e6e8"
+  }
+}

@@ -9,6 +9,7 @@ interface IEvents {
     event T_SetCollateralVaultLiquidated(address indexed collateralVault, address indexed liquidator);
     event T_FactoryPause(bool pause);
     event T_CollateralVaultCreated(address indexed vault);
+    event T_CategoryIdSet(address indexed targetVault, address indexed collateral, address indexed debt, uint8 categoryId);
     // CollateralVaultBase
     event T_Borrow(uint targetAmount, address indexed receiver);
     event T_Repay(uint repayAmount);
@@ -28,12 +29,14 @@ interface IEvents {
     event T_SetOracleRouter(address indexed newOracleRouter);
     event T_SetIntermediateVault(address indexed intermediateVault);
     event T_AddAllowedTargetVault(address indexed intermediateVault, address indexed targetVault);
+    event T_AddAllowedTargetVaultAsset(address indexed intermediateVault, address indexed targetVault, address indexed targetAsset);
     event T_RemoveAllowedTargetVault(address indexed intermediateVault, address indexed targetVault, uint index);
     event T_SetMaxLiqLTV(address indexed collateralAddress, uint16 ltv);
     event T_SetExternalLiqBuffer(address indexed collateralAddress, uint16 liqBuffer);
     event T_SetCollateralVaultFactory(address indexed factory);
     event T_SetLTV(address indexed intermediateVault, address indexed collateralVault, uint16 borrowLimit, uint16 liquidationLimit, uint32 rampDuration);
     event T_SetOracleResolvedVault(address indexed collateralAddress, bool allow);
+    event T_SetOracleResolvedVault(address indexed oracleRouter, address indexed collateralAddress, bool allow);
     event T_DoCall(address indexed to, uint value, bytes data);
     // LeverageOperator
     event T_LeverageUpExecuted(address indexed collateralVault);

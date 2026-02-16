@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.28;
 
-import {OverCollateralizedTestBase, console2, BridgeHookTarget} from "./OverCollateralizedTestBase.t.sol";
+import {EulerTestBase, console2, BridgeHookTarget} from "./EulerTestBase.t.sol";
 import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -13,46 +13,56 @@ import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
 import {Events} from "euler-vault-kit/EVault/shared/Events.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
+import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import { MockDirectPriceOracle } from "test/mocks/MockDirectPriceOracle.sol";
 
-interface IWETH is IERC20 {
+interface IYzPP is IERC20 {
     receive() external payable;
     function deposit() external payable;
     function withdraw(uint256 wad) external;
 }
 
-contract EulerLiquidationTest is OverCollateralizedTestBase {
+contract EulerLiquidationTest is EulerTestBase {
     uint256 BORROW_ETH_AMOUNT;
 
     function setUp() public override {
         super.setUp();
+
+        vm.startPrank(admin);
+
+        twyneVaultManager.setExternalLiqBuffer(eulerYzPP, 0.8e4);
+
+        vm.stopPrank();
     }
 
     function test_e_preLiquidationSetup(uint16 liqLTV) public {
         // copy logic from checkLiqLTV
-        uint16 minLTV = IEVault(eulerUSDC).LTVLiquidation(eulerWETH);
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(eulerWETH);
+        uint16 minLTV = IEVault(eulerUSDT).LTVLiquidation(eulerYzPP);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(eulerYzPP);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(eulerWETH));
-        // Bob deposits into eeWETH_intermediate_vault to earn boosted yield
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(eulerYzPP));
+        // Bob deposits into eeYzPP_intermediate_vault to earn boosted yield
         vm.startPrank(bob);
-        IERC20(eulerWETH).approve(address(eeWETH_intermediate_vault), type(uint256).max);
-        eeWETH_intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
+        IERC20(eulerYzPP).approve(address(eeYzPP_intermediate_vault), type(uint256).max);
+        eeYzPP_intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
         vm.stopPrank();
 
         // repeat but for Collateral non-EVK vault
         vm.startPrank(alice);
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
-                _asset: eulerWETH,
-                _targetVault: eulerUSDC,
-                _liqLTV: liqLTV
+                _vaultType: VaultType.EULER_V2,
+                _asset: eulerYzPP,
+                _targetVault: eulerUSDT,
+                _liqLTV: liqLTV,
+                _targetAsset: address(0)
             })
         );
 
         vm.label(address(alice_collateral_vault), "alice_collateral_vault");
 
-        // Alice deposit the eulerWETH token into the collateral vault
-        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
+        // Alice deposit the eulerYzPP token into the collateral vault
+        IERC20(eulerYzPP).approve(address(alice_collateral_vault), type(uint256).max);
 
         BORROW_ETH_AMOUNT = getReservedAssets(COLLATERAL_AMOUNT, alice_collateral_vault);
 
@@ -74,30 +84,32 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         (uint256 externalCollateralValueScaledByLiqLTV, ) = IEVault(alice_collateral_vault.targetVault()).accountLiquidity(address(alice_collateral_vault), true);
         uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) * externalCollateralValueScaledByLiqLTV / MAXFACTOR;
 
-        uint USDCPrice = eulerOnChain.getQuote(1, USDC, USD); // returns a value times 1e10
+        uint USDTPrice = eulerOnChain.getQuote(1, USDT, USD); // returns a value times 1e10
 
         // Use the second liquidation condition in _canLiquidate
         (externalCollateralValueScaledByLiqLTV, ) = IEVault(alice_collateral_vault.targetVault()).accountLiquidity(address(alice_collateral_vault), true);
         uint borrowAmountUSD2 = eulerOnChain.getQuote(
-            alice_collateral_vault.totalAssetsDepositedOrReserved() * uint(IEVault(eulerUSDC).LTVBorrow(eulerWETH)) / MAXFACTOR,
-            eulerWETH,
+            alice_collateral_vault.totalAssetsDepositedOrReserved() * uint(IEVault(eulerUSDT).LTVBorrow(eulerYzPP)) / MAXFACTOR,
+            eulerYzPP,
             USD
         );
-
+        console2.log("Borrow amount 1st: ", borrowAmountUSD1);
+        console2.log("Borrow amount 2nd: ", borrowAmountUSD2);
+        console2.log("Collateral value scaled: ", externalCollateralValueScaledByLiqLTV);
         if (borrowAmountUSD1 < borrowAmountUSD2) {
-            BORROW_USD_AMOUNT = borrowAmountUSD1 / USDCPrice;
+            BORROW_USD_AMOUNT = borrowAmountUSD1 / USDTPrice;
         } else {
-            BORROW_USD_AMOUNT = borrowAmountUSD2 / USDCPrice;
+            BORROW_USD_AMOUNT = borrowAmountUSD2 / USDTPrice;
         }
 
-        alice_collateral_vault.borrow(BORROW_USD_AMOUNT, alice);
-
+        alice_collateral_vault.borrow(BORROW_USD_AMOUNT - 1, alice);
+        console2.log(borrowAmountUSD1, borrowAmountUSD2);
         if (borrowAmountUSD1 < borrowAmountUSD2) { // this case happens when safety buffer is low (below 0.975)
             vm.expectRevert(TwyneErrors.VaultStatusLiquidatable.selector);
         } else { // this case happens when safety buffer is very high (near 1)
             vm.expectRevert(Errors.E_AccountLiquidity.selector);
         }
-        alice_collateral_vault.borrow(1, alice);
+        alice_collateral_vault.borrow(2, alice);
 
         vm.stopPrank();
     }
@@ -115,36 +127,36 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             BORROW_ETH_AMOUNT,
             "EVK debt not correct amount"
         );
-        assertEq(eeWETH_intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT);
+        assertEq(eeYzPP_intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT);
 
-        // collateral vault holds borrowed eulerWETH from intermediate vault
+        // collateral vault holds borrowed eulerYzPP from intermediate vault
         assertApproxEqRel(
-            IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)),
+            IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)),
             COLLATERAL_AMOUNT + BORROW_ETH_AMOUNT,
             1e5,
-            "Collateral vault not holding correct eulerWETH balance"
+            "Collateral vault not holding correct eulerYzPP balance"
         );
-        // intermediate vault holds credit LP's eulerWETH minus the borrowed amount
+        // intermediate vault holds credit LP's eulerYzPP minus the borrowed amount
         assertApproxEqRel(
-            IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault)),
+            IERC20(eulerYzPP).balanceOf(address(eeYzPP_intermediate_vault)),
             CREDIT_LP_AMOUNT - BORROW_ETH_AMOUNT,
             1e5,
-            "Intermediate vault not holding correct eulerWETH balance"
+            "Intermediate vault not holding correct eulerYzPP balance"
         );
 
-        (uint256 collateralValue, uint256 liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+        (uint256 collateralValue, uint256 liabilityValue) = eeYzPP_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
 
-        uint256 eulerWETH_quote = oracleRouter.getQuote(1e28, eulerWETH, USD);
+        uint256 eulerYzPP_quote = oracleRouter.getQuote(1e28, eulerYzPP, USD);
         assertApproxEqRel(
             collateralValue,
-            COLLATERAL_AMOUNT * eulerWETH_quote/1e28,
-            1e5,
+            COLLATERAL_AMOUNT * eulerYzPP_quote/1e28,
+            1e12,
             "Wrong intermediate vault collateralValue before time warp"
         ); // this is deposited collateral * liquidation LTV
         assertApproxEqRel(
             liabilityValue,
-            BORROW_ETH_AMOUNT * eulerWETH_quote/1e28,
-            1e5,
+            BORROW_ETH_AMOUNT * eulerYzPP_quote/1e28,
+            1e13,
             "Wrong intermediate vault liabilityValue before time warp"
         );
     }
@@ -161,38 +173,39 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
     function test_e_setupLiquidationAccrueInterest(uint16 liqLTV) public noGasMetering {
         test_e_preLiquidationSetup(liqLTV);
 
-        // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
-            // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
-            vm.warp(block.timestamp + 600); // accrue interest
-        } else {
-            // If safety buffer is very high, set price with mockOracle
-            address eulerRouter = IEVault(eulerUSDC).oracle();
-            vm.startPrank(EulerRouter(eulerRouter).governor());
-            EulerRouter(eulerRouter).govSetConfig(WETH, USD, address(mockOracle));
-            EulerRouter(eulerRouter).govSetConfig(USDC, USD, address(mockOracle));
-            mockOracle.setPrice(WETH, USD, WETH_USD_PRICE_INITIAL*95/100);
-            mockOracle.setPrice(USDC, USD, USDC_USD_PRICE_INITIAL);
-            vm.stopPrank();
+        vm.warp(block.timestamp + 60000); // accrue interest
 
-            vm.startPrank(oracleRouter.governor());
-            oracleRouter.govSetConfig(WETH, USD, address(mockOracle));
-            mockOracle.setPrice(WETH, USD, WETH_USD_PRICE_INITIAL*95/100);
-            vm.stopPrank();
-        }
+        // If safety buffer is very high, set price with mockOracle
+        address eulerRouter = IEVault(eulerUSDT).oracle();
+        // If safety buffer is very high, set price with mockOracle?
+        MockDirectPriceOracle directOracle = new MockDirectPriceOracle();
+        vm.startPrank(EulerRouter(eulerRouter).governor());
+        EulerRouter(eulerRouter).govSetConfig(YzPP, USD, address(directOracle));
+        EulerRouter(eulerRouter).govSetConfig(USDT, USD, address(directOracle));
+        EulerRouter(eulerRouter).govSetResolvedVault(YzPP, false);
+        directOracle.setPrice(YzPP, USD, YzPP_USD_PRICE_INITIAL);
+        directOracle.setPrice(USDT, USD, USDT_USD_PRICE_INITIAL);
+        vm.stopPrank();
+
+        vm.startPrank(oracleRouter.governor());
+        oracleRouter.govSetConfig(YzPP, USD, address(directOracle));
+        oracleRouter.govSetConfig(USDT, USD, address(directOracle));
+        oracleRouter.govSetResolvedVault(YzPP, false);
+        vm.stopPrank();
+
 
         // Verify debt to intermediate vault increased IF there was a non-zero BORROW_ETH_AMOUNT amount reserved
-        (, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+        uint intermediate_debt = eeYzPP_intermediate_vault.debtOf(address(alice_collateral_vault));
         if (BORROW_ETH_AMOUNT != 0) {
-            assertGt(liabilityValue, BORROW_ETH_AMOUNT, "alice debt to intermediate vault did not increase");
+            assertGt(intermediate_debt, BORROW_ETH_AMOUNT, "alice debt to intermediate vault did not increase");
         }
 
         // confirm vault can be liquidated now that there is more collateral
         assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be unhealthy but it cannot be liquidated!");
 
         vm.startPrank(liquidator);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
-        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(eulerYzPP).approve(address(alice_collateral_vault), type(uint256).max);
 
         vm.stopPrank();
     }
@@ -202,11 +215,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         // To put the vault into a liquidatable state, don't warp, but alter the safety buffer
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0.8e4);
+        twyneVaultManager.setExternalLiqBuffer(eulerYzPP, 0.6e4);
         vm.stopPrank();
 
         // Verify debt to intermediate vault increased
-        (, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+        (, uint liabilityValue) = eeYzPP_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
         if (BORROW_ETH_AMOUNT != 0) {
             assertGt(liabilityValue, BORROW_ETH_AMOUNT, "alice debt to intermediate vault did not increase");
         }
@@ -215,8 +228,8 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be unhealthy but it cannot be liquidated!");
 
         vm.startPrank(liquidator);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
-        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(eulerYzPP).approve(address(alice_collateral_vault), type(uint256).max);
 
         vm.stopPrank();
     }
@@ -225,15 +238,15 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_preLiquidationSetup(liqLTV);
 
         // To put the vault into a liquidatable state, don't warp, but lower the external LTV
-        vm.startPrank(IEVault(eulerUSDC).governorAdmin());
-        IEVault(eulerUSDC).setLTV(eulerWETH, 0.5e4, 0.6e4, 0);
+        vm.startPrank(IEVault(eulerUSDT).governorAdmin());
+        IEVault(eulerUSDT).setLTV(eulerYzPP, 0.5e4, 0.6e4, 0);
         vm.stopPrank();
 
         // to ensure vaults are out of liquidation cool off period
         vm.warp(block.timestamp + 2);
 
         // Verify debt to intermediate vault increased
-        (, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+        (, uint liabilityValue) = eeYzPP_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
         if (BORROW_ETH_AMOUNT != 0) {
             assertGt(liabilityValue, BORROW_ETH_AMOUNT, "alice debt to intermediate vault did not increase");
         }
@@ -241,13 +254,13 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // confirm vault can be liquidated now that there is more collateral
         assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be unhealthy but it cannot be liquidated!");
 
-        // Confirm external liquidation is possible from eulerUSDC perspective
-        (uint maxrepay, ) = IEVault(eulerUSDC).checkLiquidation(address(this), address(alice_collateral_vault), eulerWETH);
+        // Confirm external liquidation is possible from eulerUSDT perspective
+        (uint maxrepay, ) = IEVault(eulerUSDT).checkLiquidation(address(this), address(alice_collateral_vault), eulerYzPP);
         assertGt(maxrepay, 0, "Vault cannot be externally liquidated");
 
         vm.startPrank(liquidator);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
-        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(eulerYzPP).approve(address(alice_collateral_vault), type(uint256).max);
 
         vm.stopPrank();
     }
@@ -267,38 +280,36 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         // Borrow using the exact amounts of an older test setup
         vm.startPrank(alice);
-        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
+        IERC20(eulerYzPP).approve(address(alice_collateral_vault), type(uint).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint).max);
         alice_collateral_vault.deposit(5 ether);
-        alice_collateral_vault.borrow(6983982500, alice);
+        alice_collateral_vault.borrow(3899999, alice);
         vm.stopPrank();
 
-                // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
-            // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
-            vm.warp(block.timestamp + 600); // accrue interest
-        } else {
-            // If safety buffer is very high, set price with mockOracle
-            address eulerRouter = IEVault(eulerUSDC).oracle();
-            vm.startPrank(EulerRouter(eulerRouter).governor());
-            EulerRouter(eulerRouter).govSetConfig(WETH, USD, address(mockOracle));
-            EulerRouter(eulerRouter).govSetConfig(USDC, USD, address(mockOracle));
-            mockOracle.setPrice(WETH, USD, WETH_USD_PRICE_INITIAL*3/10);
-            mockOracle.setPrice(USDC, USD, USDC_USD_PRICE_INITIAL);
-            vm.stopPrank();
 
-            vm.startPrank(oracleRouter.governor());
-            oracleRouter.govSetConfig(WETH, USD, address(mockOracle));
-            mockOracle.setPrice(WETH, USD, WETH_USD_PRICE_INITIAL*3/10);
-            vm.stopPrank();
-        }
+        address eulerRouter = IEVault(eulerUSDT).oracle();
+        // If safety buffer is very high, set price with mockOracle?
+        MockDirectPriceOracle directOracle = new MockDirectPriceOracle();
+        vm.startPrank(EulerRouter(eulerRouter).governor());
+        EulerRouter(eulerRouter).govSetConfig(YzPP, USD, address(directOracle));
+        EulerRouter(eulerRouter).govSetConfig(USDT, USD, address(directOracle));
+        EulerRouter(eulerRouter).govSetResolvedVault(YzPP, false);
+        directOracle.setPrice(YzPP, USD, YzPP_USD_PRICE_INITIAL*3/10);
+        directOracle.setPrice(USDT, USD, USDT_USD_PRICE_INITIAL);
+        vm.stopPrank();
+
+        vm.startPrank(oracleRouter.governor());
+        oracleRouter.govSetConfig(YzPP, USD, address(directOracle));
+        oracleRouter.govSetResolvedVault(YzPP, false);
+        vm.stopPrank();
+
     }
 
     function test_e_handleCompleteExternalLiquidation() public noGasMetering {
         test_e_setupCompleteExternalLiquidation();
 
         // Verify debt to intermediate vault increased
-        (, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+        uint liabilityValue = eeYzPP_intermediate_vault.debtOf(address(alice_collateral_vault));
         if (BORROW_ETH_AMOUNT != 0) {
             assertGt(liabilityValue, BORROW_ETH_AMOUNT, "alice debt to intermediate vault did not increase");
         }
@@ -308,23 +319,23 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         vm.warp(block.timestamp + 1);
 
-        // Ensure liquidator has enough eulerWETH to be a valid liquidator
-        dealEToken(eulerWETH, liquidator, 100 ether);
+        // Ensure liquidator has enough eulerYzPP to be a valid liquidator
+        dealEToken(eulerYzPP, liquidator, 100 ether);
 
         vm.startPrank(liquidator);
 
-        IEVC(IEVault(eulerWETH).EVC()).enableCollateral(liquidator, address(eulerWETH));
-        IEVC(IEVault(eulerUSDC).EVC()).enableController(liquidator, address(eulerUSDC));
+        IEVC(IEVault(eulerYzPP).EVC()).enableCollateral(liquidator, address(eulerYzPP));
+        IEVC(IEVault(eulerUSDT).EVC()).enableController(liquidator, address(eulerUSDT));
 
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
-        // liquidate alice_collateral_vault via eulerUSDC EVault
+        // liquidate alice_collateral_vault via eulerUSDT EVault
         assertGt(alice_collateral_vault.maxRepay(), 0);
 
         // This decreases the entire debt and collateral amount to 0.
         // Hence, this test only tests a subset of possibilities.
-        IEVault(eulerUSDC).liquidate({
+        IEVault(eulerUSDT).liquidate({
             violator: address(alice_collateral_vault),
-            collateral: eulerWETH,
+            collateral: eulerYzPP,
             repayAssets: type(uint).max,
             minYieldBalance: 0
         });
@@ -334,8 +345,8 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         // Since the external liquidation reduced the debt and its collateral amount to 0,
         // there is no collateral that is collateralizing the intermediate vault debt.
-        assertEq(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), 0, "collateral vault debt to euler USDC vault is not zero");
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "euler WETH in collateral vault is not zero");
+        assertEq(IEVault(eulerUSDT).debtOf(address(alice_collateral_vault)), 0, "collateral vault debt to euler USDT vault is not zero");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "euler YzPP in collateral vault is not zero");
         assertGt(alice_collateral_vault.maxRelease(), 0, "collateral vault maxRelease is zero");
         uint initialMaxRelease = alice_collateral_vault.maxRelease();
 
@@ -390,7 +401,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             onBehalfOfAccount: newLiquidator,
             targetContract: address(alice_collateral_vault.intermediateVault()),
             value: 0,
-            data: abi.encodeCall(IEVault(eulerWETH).liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
+            data: abi.encodeCall(IEVault(eulerYzPP).liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
         });
 
         vm.expectEmit(false, false, true, true);
@@ -398,11 +409,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         evc.batch(items1);
 
         // Confirm collateral vault is empty
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
 
         vm.stopPrank();
 
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
         assertEq(alice_collateral_vault.borrower(), address(0));
         assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0);
         assertEq(alice_collateral_vault.maxRelease(), 0);
@@ -416,53 +427,51 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
     function test_e_handleExternalLiquidationWithZeroMaxRelease() public noGasMetering {
         // Calculate minimum LTV so the collateral vault mimics a position on the underlying protocol
-        uint16 minimumLTV = uint16(uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffers(eulerWETH)) / MAXFACTOR);
+        uint16 minimumLTV = uint16(uint(IEVault(eulerUSDT).LTVLiquidation(eulerYzPP)) * uint(twyneVaultManager.externalLiqBuffers(eulerYzPP)) / MAXFACTOR);
         test_e_preLiquidationSetup(minimumLTV);
 
-        // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
-            // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
-            vm.warp(block.timestamp + 600); // accrue interest
-        } else {
-            // If safety buffer is very high, set price with mockOracle
-            address eulerRouter = IEVault(eulerUSDC).oracle();
-            vm.startPrank(EulerRouter(eulerRouter).governor());
-            EulerRouter(eulerRouter).govSetConfig(WETH, USD, address(mockOracle));
-            EulerRouter(eulerRouter).govSetConfig(USDC, USD, address(mockOracle));
-            mockOracle.setPrice(WETH, USD, WETH_USD_PRICE_INITIAL*95/100);
-            mockOracle.setPrice(USDC, USD, USDC_USD_PRICE_INITIAL);
-            vm.stopPrank();
+        address eulerRouter = IEVault(eulerUSDT).oracle();
+        // If safety buffer is very high, set price with mockOracle?
+        MockDirectPriceOracle directOracle = new MockDirectPriceOracle();
+        vm.startPrank(EulerRouter(eulerRouter).governor());
+        EulerRouter(eulerRouter).govSetConfig(YzPP, USD, address(directOracle));
+        EulerRouter(eulerRouter).govSetConfig(USDT, USD, address(directOracle));
+        EulerRouter(eulerRouter).govSetResolvedVault(YzPP, false);
+        directOracle.setPrice(YzPP, USD, YzPP_USD_PRICE_INITIAL*78/100);
+        directOracle.setPrice(USDT, USD, USDT_USD_PRICE_INITIAL);
+        vm.stopPrank();
 
-            vm.startPrank(oracleRouter.governor());
-            oracleRouter.govSetConfig(WETH, USD, address(mockOracle));
-            mockOracle.setPrice(WETH, USD, WETH_USD_PRICE_INITIAL*95/100);
-            vm.stopPrank();
-        }
+        vm.startPrank(oracleRouter.governor());
+        oracleRouter.govSetConfig(YzPP, USD, address(directOracle));
+        oracleRouter.govSetResolvedVault(YzPP, false);
+        vm.stopPrank();
+
+
 
         // confirm vault can be liquidated now that there is more collateral
         assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be unhealthy but it cannot be liquidated!");
 
         vm.warp(block.timestamp + 1);
 
-        // Ensure liquidator has enough eulerWETH to be a valid liquidator
-        dealEToken(eulerWETH, liquidator, 100 ether);
+        // Ensure liquidator has enough eulerYzPP to be a valid liquidator
+        dealEToken(eulerYzPP, liquidator, 100 ether);
 
         vm.startPrank(liquidator);
 
-        IEVC(IEVault(eulerWETH).EVC()).enableCollateral(liquidator, address(eulerWETH));
-        IEVC(IEVault(eulerUSDC).EVC()).enableController(liquidator, address(eulerUSDC));
+        IEVC(IEVault(eulerYzPP).EVC()).enableCollateral(liquidator, address(eulerYzPP));
+        IEVC(IEVault(eulerUSDT).EVC()).enableController(liquidator, address(eulerUSDT));
 
         // Assert initial state, the reverse will be true after external liquidation
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
-        assertGt(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "before: euler WETH in collateral vault is not zero");
+        assertGt(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "before: euler YzPP in collateral vault is not zero");
 
-        // liquidate alice_collateral_vault via eulerUSDC EVault
+        // liquidate alice_collateral_vault via eulerUSDT EVault
         assertGt(alice_collateral_vault.maxRepay(), 0);
 
         // This decreases the entire debt to 0, but leaves some collateral.
-        IEVault(eulerUSDC).liquidate({
+        IEVault(eulerUSDT).liquidate({
             violator: address(alice_collateral_vault),
-            collateral: eulerWETH,
+            collateral: eulerYzPP,
             repayAssets: type(uint).max,
             minYieldBalance: 0
         });
@@ -470,9 +479,9 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         assertTrue(alice_collateral_vault.isExternallyLiquidated(), "collateral vault was not externally liquidated");
 
-        assertEq(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), 0, "collateral vault debt to euler USDC vault is not zero");
+        assertEq(IEVault(eulerUSDT).debtOf(address(alice_collateral_vault)), 0, "collateral vault debt to euler USDT vault is not zero");
         // TODO fix below line
-        assertGt(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "after: euler WETH in collateral vault is not zero");
+        assertGt(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "after: euler YzPP in collateral vault is not zero");
         assertEq(alice_collateral_vault.maxRelease(), 0, "collateral vault maxRelease is zero");
 
         address newLiquidator = makeAddr("newLiquidator");
@@ -490,7 +499,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.stopPrank();
 
         // Confirm collateral vault is empty
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "collateral vault is not empty");
         assertEq(alice_collateral_vault.borrower(), address(0));
         assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 0);
         assertEq(alice_collateral_vault.maxRelease(), 0);
@@ -500,28 +509,28 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
         vm.warp(block.timestamp + 1);
 
-        // Ensure liquidator has enough eulerWETH to be a valid liquidator
-        dealEToken(eulerWETH, liquidator, 100 ether);
+        // Ensure liquidator has enough eulerYzPP to be a valid liquidator
+        dealEToken(eulerYzPP, liquidator, 100 ether);
 
         vm.startPrank(liquidator);
 
-        IEVC(IEVault(eulerWETH).EVC()).enableCollateral(liquidator, address(eulerWETH));
-        IEVC(IEVault(eulerUSDC).EVC()).enableController(liquidator, address(eulerUSDC));
+        IEVC(IEVault(eulerYzPP).EVC()).enableCollateral(liquidator, address(eulerYzPP));
+        IEVC(IEVault(eulerUSDT).EVC()).enableController(liquidator, address(eulerUSDT));
 
         IEVC(IEVault(alice_collateral_vault.intermediateVault()).EVC()).enableCollateral(liquidator, address(alice_collateral_vault));
         IEVC(IEVault(alice_collateral_vault.intermediateVault()).EVC()).enableController(liquidator, address(alice_collateral_vault.intermediateVault()));
 
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
-        // liquidate alice_collateral_vault via eulerUSDC EVault
+        // liquidate alice_collateral_vault via eulerUSDT EVault
         assertGt(alice_collateral_vault.maxRepay(), 0);
 
         // Cache the amount to repay to fully settle the liquidation
-        (uint maxrepay, ) = IEVault(eulerUSDC).checkLiquidation(address(this), address(alice_collateral_vault), eulerWETH);
+        (uint maxrepay, ) = IEVault(eulerUSDT).checkLiquidation(address(this), address(alice_collateral_vault), eulerYzPP);
 
         // Test for non-zero debt and collateral amount after external liquidation.
-        IEVault(eulerUSDC).liquidate({
+        IEVault(eulerUSDT).liquidate({
             violator: address(alice_collateral_vault),
-            collateral: eulerWETH,
+            collateral: eulerYzPP,
             repayAssets: maxrepay,
             minYieldBalance: 0
         });
@@ -539,7 +548,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             onBehalfOfAccount: liquidator,
             targetContract: address(alice_collateral_vault.intermediateVault()),
             value: 0,
-            data: abi.encodeCall(IEVault(eulerWETH).liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
+            data: abi.encodeCall(IEVault(eulerYzPP).liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
         });
 
         evc.batch(items);
@@ -548,16 +557,16 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         address baseAsset = alice_collateral_vault.targetAsset();
         address crossAsset = IEVault(alice_collateral_vault.asset()).unitOfAccount();
         address quoteAsset = IEVault(alice_collateral_vault.asset()).asset();
-        address oracleBaseCross = EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(baseAsset, crossAsset);
-        address oracleCrossQuote = EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(quoteAsset, crossAsset);
+        address oracleBaseCross = EulerRouter(IEVault(eulerUSDT).oracle()).getConfiguredOracle(baseAsset, crossAsset);
+        address oracleCrossQuote = EulerRouter(IEVault(eulerUSDT).oracle()).getConfiguredOracle(quoteAsset, crossAsset);
         // Add the crossAdapter oracle to the EulerRouter
         vm.startPrank(admin);
         CrossAdapter crossAdapterOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
         twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdapterOracle))));
         vm.stopPrank();
 
-        // assertGt(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), 0);
-        // assertGt(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0);
+        // assertGt(IEVault(eulerUSDT).debtOf(address(alice_collateral_vault)), 0);
+        // assertGt(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0);
 
         vm.stopPrank();
 
@@ -581,30 +590,30 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         vm.warp(block.timestamp + 1);
 
-        // Ensure liquidator has enough eulerWETH to be a valid liquidator
-        dealEToken(eulerWETH, liquidator, 100 ether);
+        // Ensure liquidator has enough eulerYzPP to be a valid liquidator
+        dealEToken(eulerYzPP, liquidator, 100 ether);
 
         vm.startPrank(liquidator);
 
-        IEVC(IEVault(eulerWETH).EVC()).enableCollateral(liquidator, address(eulerWETH));
-        IEVC(IEVault(eulerUSDC).EVC()).enableController(liquidator, address(eulerUSDC));
+        IEVC(IEVault(eulerYzPP).EVC()).enableCollateral(liquidator, address(eulerYzPP));
+        IEVC(IEVault(eulerUSDT).EVC()).enableController(liquidator, address(eulerUSDT));
 
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
-        // liquidate alice_collateral_vault via eulerUSDC EVault
+        // liquidate alice_collateral_vault via eulerUSDT EVault
         assertGt(alice_collateral_vault.maxRepay(), 0);
 
         // This decreases the entire debt and collateral amount to 0.
         // Hence, this test only tests a subset of possibilities.
-        IEVault(eulerUSDC).liquidate({
+        IEVault(eulerUSDT).liquidate({
             violator: address(alice_collateral_vault),
-            collateral: eulerWETH,
+            collateral: eulerYzPP,
             repayAssets: 2,
             minYieldBalance: 0
         });
         vm.stopPrank();
 
         assertTrue(alice_collateral_vault.isExternallyLiquidated(), "collateral vault was not externally liquidated");
-        (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(eulerUSDC).accountLiquidity(address(alice_collateral_vault), true);
+        (uint externalCollateralValueScaledByLiqLTV, uint externalBorrowDebtValue) = IEVault(eulerUSDT).accountLiquidity(address(alice_collateral_vault), true);
         assertTrue(externalCollateralValueScaledByLiqLTV < externalBorrowDebtValue, "Euler position should be unhealthy");
 
         address newLiquidator = makeAddr("newLiquidator");
@@ -620,44 +629,44 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
         vm.warp(block.timestamp + 1);
 
-        // Ensure liquidator has enough eulerWETH to be a valid liquidator
-        dealEToken(eulerWETH, liquidator, 100 ether);
+        // Ensure liquidator has enough eulerYzPP to be a valid liquidator
+        dealEToken(eulerYzPP, liquidator, 100 ether);
 
         vm.startPrank(liquidator);
 
-        IEVC(IEVault(eulerWETH).EVC()).enableCollateral(liquidator, address(eulerWETH));
-        IEVC(IEVault(eulerUSDC).EVC()).enableController(liquidator, address(eulerUSDC));
+        IEVC(IEVault(eulerYzPP).EVC()).enableCollateral(liquidator, address(eulerYzPP));
+        IEVC(IEVault(eulerUSDT).EVC()).enableController(liquidator, address(eulerUSDT));
 
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
-        // liquidate alice_collateral_vault via eulerUSDC EVault
+        // liquidate alice_collateral_vault via eulerUSDT EVault
         assertGt(alice_collateral_vault.maxRepay(), 0);
 
         // Cache the amount to repay to fully settle the liquidation
-        (uint maxrepay, ) = IEVault(eulerUSDC).checkLiquidation(address(this), address(alice_collateral_vault), eulerWETH);
+        (uint maxrepay, ) = IEVault(eulerUSDT).checkLiquidation(address(this), address(alice_collateral_vault), eulerYzPP);
 
         // Test for non-zero debt and collateral amount after external liquidation.
-        IEVault(eulerUSDC).liquidate({
+        IEVault(eulerUSDT).liquidate({
             violator: address(alice_collateral_vault),
-            collateral: eulerWETH,
+            collateral: eulerYzPP,
             repayAssets: maxrepay/2,
             minYieldBalance: 0
         });
         assertTrue(alice_collateral_vault.isExternallyLiquidated());
 
-        (uint256 collateralValue,) = IEVault(eulerUSDC).accountLiquidity(address(alice_collateral_vault), false);
+        (uint256 collateralValue,) = IEVault(eulerUSDT).accountLiquidity(address(alice_collateral_vault), false);
 
-        uint collateralToDeposit = alice_collateral_vault.totalAssetsDepositedOrReserved() - IERC20(eulerWETH).balanceOf(address(alice_collateral_vault));
+        uint collateralToDeposit = alice_collateral_vault.totalAssetsDepositedOrReserved() - IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault));
 
-        IERC20(eulerWETH).transfer(address(alice_collateral_vault), collateralToDeposit - 1);
+        IERC20(eulerYzPP).transfer(address(alice_collateral_vault), collateralToDeposit - 1);
         assertTrue(alice_collateral_vault.isExternallyLiquidated());
-        IERC20(eulerWETH).transfer(address(alice_collateral_vault), 1);
+        IERC20(eulerYzPP).transfer(address(alice_collateral_vault), 1);
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
-        IERC20(eulerWETH).transfer(address(alice_collateral_vault), 1);
+        IERC20(eulerYzPP).transfer(address(alice_collateral_vault), 1);
         assertFalse(alice_collateral_vault.isExternallyLiquidated());
         vm.stopPrank();
 
         // Check that Euler sees the correct collateral amount
-        (uint256 collateralValue1,) = IEVault(eulerUSDC).accountLiquidity(address(alice_collateral_vault), false);
+        (uint256 collateralValue1,) = IEVault(eulerUSDT).accountLiquidity(address(alice_collateral_vault), false);
         assertGt(
             collateralValue1,
             collateralValue,
@@ -673,7 +682,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // to ensure vaults are out of liquidation cool off period
         vm.warp(block.timestamp + 2);
 
-        address eulerEVC = IEVault(eulerWETH).EVC();
+        address eulerEVC = IEVault(eulerYzPP).EVC();
 
         vm.startPrank(alice);
 
@@ -682,27 +691,27 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: eulerEVC,
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(evc.enableCollateral, (address(evc), eulerWETH))
+            data: abi.encodeCall(evc.enableCollateral, (address(evc), eulerYzPP))
         });
         items[1] = IEVC.BatchItem({
             targetContract: eulerEVC,
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(evc.enableController, (address(evc), eulerUSDC))
+            data: abi.encodeCall(evc.enableController, (address(evc), eulerUSDT))
         });
         evc.batch(items);
 
         // Confirm Twyne liquidation can happen
         assertTrue(alice_collateral_vault.canLiquidate(), "Vault cannot be liquidated!");
         // Confirm external liquidation can happen
-        (uint maxrepay, ) = IEVault(eulerUSDC).checkLiquidation(address(this), address(alice_collateral_vault), eulerWETH);
+        (uint maxrepay, ) = IEVault(eulerUSDT).checkLiquidation(address(this), address(alice_collateral_vault), eulerYzPP);
         assertGt(maxrepay, 0, "Vault cannot be externally liquidated");
 
         items[0] = IEVC.BatchItem({
-            targetContract: eulerUSDC,
+            targetContract: eulerUSDT,
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(IEVault(eulerUSDC).liquidate, (address(alice_collateral_vault), eulerWETH, type(uint).max, 0))
+            data: abi.encodeCall(IEVault(eulerUSDT).liquidate, (address(alice_collateral_vault), eulerYzPP, type(uint).max, 0))
         });
         items[1] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
@@ -779,9 +788,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This confirms that a user with an existing vault can ALSO liquidate other vaults
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
-                _asset: eulerWETH,
-                _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _vaultType: VaultType.EULER_V2,
+                _asset: eulerYzPP,
+                _targetVault: eulerUSDT,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -878,7 +889,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.stopPrank();
     }
 
-    // Test 4: liquidator who liquidates and makes the position healthy by repaying Aave debt ends up with LTV of 0 to Euler (no vUSDC debt)
+    // Test 4: liquidator who liquidates and makes the position healthy by repaying Aave debt ends up with LTV of 0 to Euler (no vUSDT debt)
     function test_e_liquidate_make_healthy_zero_euler_debt_accrue_interest() public noGasMetering {
         test_e_setupLiquidationAccrueInterest(twyneLiqLTV);
         // Verify all asset balances before liquidation process
@@ -889,10 +900,10 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             "EVK debt not correct amount before liquidation"
         );
         uint256 eulerCurrentDebt = alice_collateral_vault.maxRepay();
-        assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e12, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
+        assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e15, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
         // Verify that liquidator has no collateral vault shares and no intermediate vault debt before the liquidation
         assertEq(alice_collateral_vault.balanceOf(liquidator), 0, "Liquidator should have zero collateral vault shares 1");
-        assertEq(eeWETH_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
+        assertEq(eeYzPP_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
 
         // Avoid liquidation cooloff
         vm.warp(block.timestamp + 12);
@@ -900,7 +911,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that the internal borrow from the intermediate vault cannot be liquidated currently
         vm.startPrank(liquidator);
 
-        (uint256 repay, uint256 yield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 repay, uint256 yield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         if (repay != 0 || yield != 0) {
             // either repay or yield is NOT zero, means internal borrow can be liquidated
             console2.log("Repay or yield is not zero!", repay);
@@ -959,10 +970,10 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that Alice holds collateral vault shares and intermediate vault debt
         assertApproxEqRel(alice_collateral_vault.maxRelease(), BORROW_ETH_AMOUNT, 1e14, "EVK debt not correct amount before liquidation");
         uint256 eulerCurrentDebt = alice_collateral_vault.maxRepay();
-        assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e12, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
+        assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e15, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
         // Verify that liquidator has no collateral vault shares and no intermediate vault debt before the liquidation
         assertEq(alice_collateral_vault.balanceOf(liquidator), 0, "Liquidator should have zero collateral vault shares 1");
-        assertEq(eeWETH_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
+        assertEq(eeYzPP_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
 
         // Avoid liquidation cooloff
         vm.warp(block.timestamp + 12);
@@ -970,7 +981,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that the internal borrow from the intermediate vault cannot be liquidated currently
         vm.startPrank(liquidator);
 
-        (uint256 repay, uint256 yield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 repay, uint256 yield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         if (repay != 0 || yield != 0) {
             // either repay or yield is NOT zero, means internal borrow can be liquidated
             console2.log("Repay or yield is not zero!", repay);
@@ -1005,16 +1016,26 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         items[2] = IEVC.BatchItem({
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
-            value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 1, alice))
+            value: 0, // change -1 to -2 because without credit risk manager, it won't allow withdraw as debt and collateral both would be 1
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 2, alice))
         });
 
-        // liquidator didn't withdraw fully to satisfy invariants
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
         evc.batch(items);
+        // make full utilisation of intermediate vault so that intereset accrued increase intermediate vault debt
+        uint amountToWithdraw = IERC20(eulerYzPP).balanceOf(address(eeYzPP_intermediate_vault));
+        vm.startPrank(bob);
+        eeYzPP_intermediate_vault.withdraw(amountToWithdraw, bob, bob);
+        vm.stopPrank();
+        assertEq(IERC20(eulerYzPP).balanceOf(address(eeYzPP_intermediate_vault)), 0, "Not at full utilisation");
 
-        items[2].data = abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice));
-        evc.batch(items);
+        assertEq(eeYzPP_intermediate_vault.debtOf(address(alice_collateral_vault)), 1, "Intermediate vault debt is not correct");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), 3, "Total assets deposited or reserved is not correct");
+        assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 2, "Balance is not greater than 0");
+
+        vm.warp(block.timestamp + 1000 days);
+        // Rebalance to make sure excess credit is released back to intermediate vault
+        alice_collateral_vault.rebalance();
+
 
         // confirm vault ownership changed to liquidator
         assertEq(alice_collateral_vault.borrower(), liquidator, "Wrong collateral vault owner after liquidation");
@@ -1026,7 +1047,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertEq(alice_collateral_vault.maxRelease(), 0, "Alice intermediate vault debt not zero");
 
         // now collateral vault is empty
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerYzPP balance remaining in vault");
 
         vm.stopPrank();
     }
@@ -1037,15 +1058,15 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         // skip this test with high safety buffers
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(eulerYzPP) < 0.975e4) {
             // make the collateral value worthless
-            address eulerRouter = IEVault(eulerWETH).oracle();
+            address eulerRouter = IEVault(eulerYzPP).oracle();
             vm.startPrank(EulerRouter(eulerRouter).governor());
-            EulerRouter(eulerRouter).govSetConfig(WETH, USD, address(mockOracle));
+            EulerRouter(eulerRouter).govSetConfig(YzPP, USD, address(mockOracle));
             vm.stopPrank();
             vm.startPrank(admin);
-            // set WETH price in USD
-            mockOracle.setPrice(WETH, USD, 0);
+            // set YzPP price in USD
+            mockOracle.setPrice(YzPP, USD, 0);
             vm.stopPrank();
 
             // Check vault owner changes before/after liquidation happens
@@ -1088,7 +1109,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             // but in hindsight this makes sense because the liquidator is taking over the borrower's position
             // so the liquidator should call the same functions that the borrower does before borrowing
             // evc.enableCollateral(backupLiquidator, address(alice_collateral_vault));
-            // evc.enableController(backupLiquidator, address(eeWETH_intermediate_vault));
+            // evc.enableController(backupLiquidator, address(eeYzPP_intermediate_vault));
 
             vm.stopPrank();
         }
@@ -1098,12 +1119,12 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
     // We have disabled EVK vault liquidation (BridgeHookTarget is called on EVK liquidation which reverts).
     function test_e_liquidate_bad_evk_debt_accrue_interest() public noGasMetering {
         // Set max twyneLiqLTV value
-        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerWETH);
+        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerYzPP);
         test_e_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
         vm.startPrank(address(twyneVaultManager.owner()));
-        twyneVaultManager.setLTV(eeWETH_intermediate_vault, address(alice_collateral_vault), 0.1e3, 0.15e3, 0);
+        twyneVaultManager.setLTV(eeYzPP_intermediate_vault, address(alice_collateral_vault), 0.1e3, 0.15e3, 0);
         vm.stopPrank();
 
         // Confirm that Twyne collateral vault can be liquidated
@@ -1113,32 +1134,32 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.warp(block.timestamp + 12);
 
         (uint256 collateralValue, uint256 liabilityValue) =
-            eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+            eeYzPP_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
         if (BORROW_ETH_AMOUNT != 0) {
             assertGt(liabilityValue, collateralValue, "liability is not greater than collateral, EVK liquidation is not possible");
         }
 
         // Confirm that the intermediate vault's liquidation of the Twyne vault is possible
         // checkLiquidate() returns (0, 0) if the account is healthy (no liquidation possible)
-        (uint256 maxRepay, uint256 maxYield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 maxRepay, uint256 maxYield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         assertGt(maxRepay, 0, "maxRepay is zero!");
         assertGt(maxYield, 0, "maxYield is zero!");
 
         vm.deal(liquidator, 10 ether);
-        deal(address(USDC), liquidator, 10e20);
-        dealEToken(eulerWETH, liquidator, 10 * COLLATERAL_AMOUNT);
+        deal(address(USDT), liquidator, 10e20);
+        dealEToken(eulerYzPP, liquidator, 10 * COLLATERAL_AMOUNT);
 
-        IEVC(eeWETH_intermediate_vault.EVC()).enableController(address(this), address(eeWETH_intermediate_vault));
-        IEVC(eeWETH_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
+        IEVC(eeYzPP_intermediate_vault.EVC()).enableController(address(this), address(eeYzPP_intermediate_vault));
+        IEVC(eeYzPP_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
 
         // first: liquidate() call on the intermediate vault reverts due to custom Twyne hook
         vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
-        eeWETH_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
+        eeYzPP_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
 
         // second: try evc batch call, observe same revert
         IEVC.BatchItem[] memory batchItems = new IEVC.BatchItem[](1);
         batchItems[0] = IEVC.BatchItem({
-            targetContract: address(eeWETH_intermediate_vault),
+            targetContract: address(eeYzPP_intermediate_vault),
             onBehalfOfAccount: address(this),
             value: 0,
             data: abi.encodeCall(
@@ -1157,7 +1178,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         vm.startPrank(alice);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint).max);
         alice_collateral_vault.repay(BORROW_USD_AMOUNT/2);
         vm.stopPrank();
 
@@ -1201,16 +1222,16 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         // Skip this test with high safety buffers
         // Undo the process of putting the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(eulerYzPP) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
-            vm.warp(block.timestamp - 600);  // reverse the accrual of 10 minutes of interest
+            vm.warp(block.timestamp - 60000+15500);
 
             vm.startPrank(alice);
-            IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
+            IERC20(USDT).approve(address(alice_collateral_vault), type(uint256).max);
             alice_collateral_vault.repay(1);
             alice_collateral_vault.borrow(1, alice);
             vm.expectRevert(TwyneErrors.VaultStatusLiquidatable.selector);
-            alice_collateral_vault.borrow(1, alice);
+            alice_collateral_vault.borrow(2, alice);
             vm.stopPrank();
 
             vm.startPrank(liquidator);
@@ -1317,9 +1338,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This confirms that a user with an existing vault can ALSO liquidate other vaults
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
-                _asset: eulerWETH,
-                _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _vaultType: VaultType.EULER_V2,
+                _asset: eulerYzPP,
+                _targetVault: eulerUSDT,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1408,7 +1431,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.stopPrank();
     }
 
-    // Test 4: liquidator who liquidates and makes the position healthy by repaying Aave debt ends up with LTV of 0 to Euler (no vUSDC debt)
+    // Test 4: liquidator who liquidates and makes the position healthy by repaying Aave debt ends up with LTV of 0 to Euler (no vUSDT debt)
     function test_e_liquidate_make_healthy_zero_euler_debt_safetybuffer() public noGasMetering {
         test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
         // Verify all asset balances before liquidation process
@@ -1416,7 +1439,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e12, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
         // Verify that liquidator has no collateral vault shares and no intermediate vault debt before the liquidation
         assertEq(alice_collateral_vault.balanceOf(liquidator), 0, "Liquidator should have zero collateral vault shares 1");
-        assertEq(eeWETH_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
+        assertEq(eeYzPP_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
 
         // Avoid liquidation cooloff
         vm.warp(block.timestamp + 12);
@@ -1424,7 +1447,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that the internal borrow from the intermediate vault cannot be liquidated currently
         vm.startPrank(liquidator);
 
-        (uint256 repay, uint256 yield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 repay, uint256 yield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         if (repay != 0 || yield != 0) {
             // either repay or yield is NOT zero, means internal borrow can be liquidated
             console2.log("Repay or yield is not zero!", repay);
@@ -1475,7 +1498,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e12, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
         // Verify that liquidator has no collateral vault shares and no intermediate vault debt before the liquidation
         assertEq(alice_collateral_vault.balanceOf(liquidator), 0, "Liquidator should have zero collateral vault shares 1");
-        assertEq(eeWETH_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
+        assertEq(eeYzPP_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
 
         // Avoid liquidation cooloff
         vm.warp(block.timestamp + 12);
@@ -1483,7 +1506,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that the internal borrow from the intermediate vault cannot be liquidated currently
         vm.startPrank(liquidator);
 
-        (uint256 repay, uint256 yield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 repay, uint256 yield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         if (repay != 0 || yield != 0) {
             // either repay or yield is NOT zero, means internal borrow can be liquidated
             console2.log("Repay or yield is not zero!", repay);
@@ -1519,14 +1542,9 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 1, alice))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice))
         });
 
-        // liquidator didn't withdraw fully to satisfy invariants
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        evc.batch(items);
-
-        items[2].data = abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice));
         evc.batch(items);
 
         // confirm vault ownership changed to liquidator
@@ -1539,7 +1557,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertEq(alice_collateral_vault.maxRelease(), 0, "Alice intermediate vault debt not zero");
 
         // now collateral vault is empty
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerYzPP balance remaining in vault");
 
         vm.stopPrank();
     }
@@ -1550,13 +1568,13 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
 
         // make the collateral value worthless
-        address eulerRouter = IEVault(eulerWETH).oracle();
+        address eulerRouter = IEVault(eulerYzPP).oracle();
         vm.startPrank(EulerRouter(eulerRouter).governor());
-        EulerRouter(eulerRouter).govSetConfig(WETH, USD, address(mockOracle));
+        EulerRouter(eulerRouter).govSetConfig(YzPP, USD, address(mockOracle));
         vm.stopPrank();
         vm.startPrank(admin);
-        // set WETH price in USD
-        mockOracle.setPrice(WETH, USD, 0);
+        // set YzPP price in USD
+        mockOracle.setPrice(YzPP, USD, 0);
         vm.stopPrank();
 
         // Check vault owner changes before/after liquidation happens
@@ -1591,7 +1609,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // but in hindsight this makes sense because the liquidator is taking over the borrower's position
         // so the liquidator should call the same functions that the borrower does before borrowing
         // evc.enableCollateral(backupLiquidator, address(alice_collateral_vault));
-        // evc.enableController(backupLiquidator, address(eeWETH_intermediate_vault));
+        // evc.enableController(backupLiquidator, address(eeYzPP_intermediate_vault));
 
         vm.stopPrank();
     }
@@ -1600,12 +1618,12 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
     // We have disabled EVK vault liquidation (BridgeHookTarget is called on EVK liquidation which reverts).
     function test_e_liquidate_bad_evk_debt_safetybuffer() public noGasMetering {
         // Set max twyneLiqLTV value
-        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerWETH);
+        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerYzPP);
         test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
         vm.startPrank(address(twyneVaultManager.owner()));
-        twyneVaultManager.setLTV(eeWETH_intermediate_vault, address(alice_collateral_vault), 0.1e3, 0.15e3, 0);
+        twyneVaultManager.setLTV(eeYzPP_intermediate_vault, address(alice_collateral_vault), 0.1e3, 0.15e3, 0);
         vm.stopPrank();
 
         // Confirm that Twyne collateral vault can be liquidated
@@ -1615,32 +1633,32 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.warp(block.timestamp + 12);
 
         (uint256 collateralValue, uint256 liabilityValue) =
-            eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+            eeYzPP_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
         if (BORROW_ETH_AMOUNT != 0) {
             assertGt(liabilityValue, collateralValue, "liability is not greater than collateral, EVK liquidation is not possible");
         }
 
         // Confirm that the intermediate vault's liquidation of the Twyne vault is possible
         // checkLiquidate() returns (0, 0) if the account is healthy (no liquidation possible)
-        (uint256 maxRepay, uint256 maxYield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 maxRepay, uint256 maxYield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         assertGt(maxRepay, 0, "maxRepay is zero!");
         assertGt(maxYield, 0, "maxYield is zero!");
 
         vm.deal(liquidator, 10 ether);
-        deal(address(USDC), liquidator, 10e20);
-        dealEToken(eulerWETH, liquidator, 10 * COLLATERAL_AMOUNT);
+        deal(address(USDT), liquidator, 10e20);
+        dealEToken(eulerYzPP, liquidator, 10 * COLLATERAL_AMOUNT);
 
-        IEVC(eeWETH_intermediate_vault.EVC()).enableController(address(this), address(eeWETH_intermediate_vault));
-        IEVC(eeWETH_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
+        IEVC(eeYzPP_intermediate_vault.EVC()).enableController(address(this), address(eeYzPP_intermediate_vault));
+        IEVC(eeYzPP_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
 
         // first: liquidate() call on the intermediate vault reverts due to custom Twyne hook
         vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
-        eeWETH_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
+        eeYzPP_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
 
         // second: try evc batch call, observe same revert
         IEVC.BatchItem[] memory batchItems = new IEVC.BatchItem[](1);
         batchItems[0] = IEVC.BatchItem({
-            targetContract: address(eeWETH_intermediate_vault),
+            targetContract: address(eeYzPP_intermediate_vault),
             onBehalfOfAccount: address(this),
             value: 0,
             data: abi.encodeCall(
@@ -1659,7 +1677,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
 
         vm.startPrank(alice);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint).max);
         alice_collateral_vault.repay(BORROW_USD_AMOUNT/2);
         vm.stopPrank();
 
@@ -1703,11 +1721,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         // reverse the liquidation condition
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, externalLiqBufferInitial);
+        twyneVaultManager.setExternalLiqBuffer(eulerYzPP, 0.8e4);
         vm.stopPrank();
 
         vm.startPrank(alice);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint256).max);
         alice_collateral_vault.repay(2);
         alice_collateral_vault.borrow(1, alice);
         vm.stopPrank();
@@ -1807,7 +1825,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
     function test_e_liquidate_make_healthy_more_collateral_externalLTV() public noGasMetering {
         test_e_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
 
-        dealEToken(eulerWETH, liquidator, 10 * COLLATERAL_AMOUNT);
+        dealEToken(eulerYzPP, liquidator, 10 * COLLATERAL_AMOUNT);
 
         // Check vault owner changes before/after liquidation happens
         assertEq(alice_collateral_vault.borrower(), alice, "Wrong collateral vault owner before liquidation");
@@ -1817,9 +1835,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This confirms that a user with an existing vault can ALSO liquidate other vaults
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
-                _asset: eulerWETH,
-                _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _vaultType: VaultType.EULER_V2,
+                _asset: eulerYzPP,
+                _targetVault: eulerUSDT,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1838,7 +1858,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT))
+            data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT/2))
         });
 
         evc.batch(items);
@@ -1908,7 +1928,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.stopPrank();
     }
 
-    // Test 4: liquidator who liquidates and makes the position healthy by repaying Aave debt ends up with LTV of 0 to Euler (no vUSDC debt)
+    // Test 4: liquidator who liquidates and makes the position healthy by repaying Aave debt ends up with LTV of 0 to Euler (no vUSDT debt)
     function test_e_liquidate_make_healthy_zero_euler_debt_externalLTV() public noGasMetering {
         test_e_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
         // Verify all asset balances before liquidation process
@@ -1922,7 +1942,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e12, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
         // Verify that liquidator has no collateral vault shares and no intermediate vault debt before the liquidation
         assertEq(alice_collateral_vault.balanceOf(liquidator), 0, "Liquidator should have zero collateral vault shares 1");
-        assertEq(eeWETH_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
+        assertEq(eeYzPP_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
 
         // Avoid liquidation cooloff
         vm.warp(block.timestamp + 12);
@@ -1930,7 +1950,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that the internal borrow from the intermediate vault cannot be liquidated currently
         vm.startPrank(liquidator);
 
-        (uint256 repay, uint256 yield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 repay, uint256 yield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         if (repay != 0 || yield != 0) {
             // either repay or yield is NOT zero, means internal borrow can be liquidated
             console2.log("Repay or yield is not zero!", repay);
@@ -1983,7 +2003,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertApproxEqRel(eulerCurrentDebt, BORROW_USD_AMOUNT, 1e12, "Euler current debt is wrong"); // original debt was BORROW_USD_AMOUNT
         // Verify that liquidator has no collateral vault shares and no intermediate vault debt before the liquidation
         assertEq(alice_collateral_vault.balanceOf(liquidator), 0, "Liquidator should have zero collateral vault shares 1");
-        assertEq(eeWETH_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
+        assertEq(eeYzPP_intermediate_vault.debtOf(liquidator), 0, "Liquidator should have zero intermediate vault debt 1");
 
         // Avoid liquidation cooloff
         vm.warp(block.timestamp + 12);
@@ -1991,7 +2011,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // Verify that the internal borrow from the intermediate vault cannot be liquidated currently
         vm.startPrank(liquidator);
 
-        (uint256 repay, uint256 yield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 repay, uint256 yield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         if (repay != 0 || yield != 0) {
             // either repay or yield is NOT zero, means internal borrow can be liquidated
             console2.log("Repay or yield is not zero!", repay);
@@ -2027,14 +2047,9 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 1, alice))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice))
         });
 
-        // liquidator didn't withdraw fully to satisfy invariants
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        evc.batch(items);
-
-        items[2].data = abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice));
         evc.batch(items);
 
         // confirm vault ownership changed to liquidator
@@ -2047,7 +2062,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         assertEq(alice_collateral_vault.maxRelease(), 0, "Alice intermediate vault debt not zero");
 
         // now collateral vault is empty
-        assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerWETH balance remaining in vault");
+        assertEq(IERC20(eulerYzPP).balanceOf(address(alice_collateral_vault)), 0, "Incorrect eulerYzPP balance remaining in vault");
 
         vm.stopPrank();
     }
@@ -2058,13 +2073,13 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
 
         // make the collateral value worthless
-        address eulerRouter = IEVault(eulerWETH).oracle();
+        address eulerRouter = IEVault(eulerYzPP).oracle();
         vm.startPrank(EulerRouter(eulerRouter).governor());
-        EulerRouter(eulerRouter).govSetConfig(WETH, USD, address(mockOracle));
+        EulerRouter(eulerRouter).govSetConfig(YzPP, USD, address(mockOracle));
         vm.stopPrank();
         vm.startPrank(admin);
-        // set WETH price in USD
-        mockOracle.setPrice(WETH, USD, 0);
+        // set YzPP price in USD
+        mockOracle.setPrice(YzPP, USD, 0);
         vm.stopPrank();
 
         // Check vault owner changes before/after liquidation happens
@@ -2099,7 +2114,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // but in hindsight this makes sense because the liquidator is taking over the borrower's position
         // so the liquidator should call the same functions that the borrower does before borrowing
         // evc.enableCollateral(backupLiquidator, address(alice_collateral_vault));
-        // evc.enableController(backupLiquidator, address(eeWETH_intermediate_vault));
+        // evc.enableController(backupLiquidator, address(eeYzPP_intermediate_vault));
 
         vm.stopPrank();
     }
@@ -2111,7 +2126,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
         vm.startPrank(address(twyneVaultManager.owner()));
-        twyneVaultManager.setLTV(eeWETH_intermediate_vault, address(alice_collateral_vault), 0.1e3, 0.15e3, 0);
+        twyneVaultManager.setLTV(eeYzPP_intermediate_vault, address(alice_collateral_vault), 0.1e3, 0.15e3, 0);
         vm.stopPrank();
 
         // Confirm that Twyne collateral vault can be liquidated
@@ -2121,32 +2136,32 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.warp(block.timestamp + 12);
 
         (uint256 collateralValue, uint256 liabilityValue) =
-            eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
+            eeYzPP_intermediate_vault.accountLiquidity(address(alice_collateral_vault), true);
         if (BORROW_ETH_AMOUNT != 0) {
             assertGt(liabilityValue, collateralValue, "liability is not greater than collateral, EVK liquidation is not possible");
         }
 
         // Confirm that the intermediate vault's liquidation of the Twyne vault is possible
         // checkLiquidate() returns (0, 0) if the account is healthy (no liquidation possible)
-        (uint256 maxRepay, uint256 maxYield) = eeWETH_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
+        (uint256 maxRepay, uint256 maxYield) = eeYzPP_intermediate_vault.checkLiquidation(liquidator, address(alice_collateral_vault), address(alice_collateral_vault));
         assertGt(maxRepay, 0, "maxRepay is zero!");
         assertGt(maxYield, 0, "maxYield is zero!");
 
         vm.deal(liquidator, 10 ether);
-        deal(address(USDC), liquidator, 10e20);
-        dealEToken(eulerWETH, liquidator, 10 * COLLATERAL_AMOUNT);
+        deal(address(USDT), liquidator, 10e20);
+        dealEToken(eulerYzPP, liquidator, 10 * COLLATERAL_AMOUNT);
 
-        IEVC(eeWETH_intermediate_vault.EVC()).enableController(address(this), address(eeWETH_intermediate_vault));
-        IEVC(eeWETH_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
+        IEVC(eeYzPP_intermediate_vault.EVC()).enableController(address(this), address(eeYzPP_intermediate_vault));
+        IEVC(eeYzPP_intermediate_vault.EVC()).enableCollateral(address(this), address(alice_collateral_vault));
 
         // first: liquidate() call on the intermediate vault reverts due to custom Twyne hook
         vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
-        eeWETH_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
+        eeYzPP_intermediate_vault.liquidate(address(alice_collateral_vault), address(alice_collateral_vault), type(uint256).max, 0);
 
         // second: try evc batch call, observe same revert
         IEVC.BatchItem[] memory batchItems = new IEVC.BatchItem[](1);
         batchItems[0] = IEVC.BatchItem({
-            targetContract: address(eeWETH_intermediate_vault),
+            targetContract: address(eeYzPP_intermediate_vault),
             onBehalfOfAccount: address(this),
             value: 0,
             data: abi.encodeCall(
@@ -2165,7 +2180,7 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         test_e_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
 
         vm.startPrank(alice);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint).max);
         alice_collateral_vault.repay(BORROW_USD_AMOUNT/2);
         vm.stopPrank();
 
@@ -2211,20 +2226,16 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.warp(block.timestamp - 2);
 
         // reverse the accrual of excess interest
-        vm.startPrank(IEVault(eulerUSDC).governorAdmin());
-        if (block.chainid == 1) {
-            IEVault(eulerUSDC).setLTV(eulerWETH, 0.83e4, 0.85e4, 0);
-        } else if (block.chainid == 8453) {
-            IEVault(eulerUSDC).setLTV(eulerWETH, 0.85e4, 0.87e4, 0);
-        }
+        vm.startPrank(IEVault(eulerUSDT).governorAdmin());
+        IEVault(eulerUSDT).setLTV(eulerYzPP, 0.80e4, 0.88e4, 0);
         vm.stopPrank();
 
         vm.startPrank(alice);
-        IERC20(USDC).approve(address(alice_collateral_vault), type(uint256).max);
+        IERC20(USDT).approve(address(alice_collateral_vault), type(uint256).max);
         alice_collateral_vault.repay(1);
         alice_collateral_vault.borrow(1, alice);
         vm.expectRevert();
-        alice_collateral_vault.borrow(1, alice);
+        alice_collateral_vault.borrow(2, alice);
         vm.stopPrank();
 
         vm.startPrank(liquidator);

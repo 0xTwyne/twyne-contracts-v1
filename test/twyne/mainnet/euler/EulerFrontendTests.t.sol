@@ -9,7 +9,7 @@ import {MockChainlinkOracle} from "test/mocks/MockChainlinkOracle.sol";
 import {ChainlinkOracle} from "euler-price-oracle/src/adapter/chainlink/ChainlinkOracle.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
-import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -33,7 +33,7 @@ contract EulerFrontendTests is EulerTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (eulerWETH, eulerUSDC, twyneLiqLTV))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, eulerWETH, eulerUSDC, twyneLiqLTV, address(0)))
         });
         vm.startPrank(alice);
         (IEVC.BatchItemResult[] memory batchItemsResult,,) = evc.batchSimulation(items);
@@ -66,7 +66,7 @@ contract EulerFrontendTests is EulerTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (eulerWETH, eulerUSDC, twyneLiqLTV))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, eulerWETH, eulerUSDC, twyneLiqLTV, address(0)))
         });
         // Perform Permit2 on the collateral vault
         items[1] = IEVC.BatchItem({
@@ -377,9 +377,11 @@ contract EulerFrontendTests is EulerTestBase {
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -423,9 +425,11 @@ contract EulerFrontendTests is EulerTestBase {
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 

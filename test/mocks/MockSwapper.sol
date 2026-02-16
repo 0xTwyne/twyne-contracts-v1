@@ -6,9 +6,9 @@ import {SafeERC20Lib, IERC20 as IERC20_Euler} from "euler-vault-kit/EVault/share
 
 contract MockSwapper {
     function swap(
-        address tokenIn,
+        address /*tokenIn*/,
         address tokenOut,
-        uint amountIn,
+        uint /*amountIn*/,
         uint minAmountOut,
         address receiver
     ) external {

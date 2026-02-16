@@ -7,7 +7,7 @@ import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
-import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConnector.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 
@@ -165,7 +165,7 @@ contract TwyneUpgradeTests is Test {
         // Step 2: Create a collateral vault and teleport the position
         vm.startPrank(user);
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(eulerWETH, eulerUSDC, 0.9e4)
+            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, eulerWETH, eulerUSDC, 0.9e4, address(0))
         );
         vm.stopPrank();
         vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
@@ -238,7 +238,7 @@ contract TwyneUpgradeTests is Test {
 
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(eulerWETH, eulerUSDC, 0.9e4)
+            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, eulerWETH, eulerUSDC, 0.9e4, address(0))
         );
 
         vm.label(address(alice_collateral_vault), "alice_collateral_vault");

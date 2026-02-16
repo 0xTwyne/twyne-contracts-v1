@@ -9,7 +9,7 @@ import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 import {SequenceRegistry} from "euler-vault-kit/SequenceRegistry/SequenceRegistry.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
-import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Initialize} from "euler-vault-kit/EVault/modules/Initialize.sol";
 import {Token} from "euler-vault-kit/EVault/modules/Token.sol";
@@ -27,7 +27,7 @@ import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
-import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
+import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_PULL_DEBT, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -54,6 +54,7 @@ contract TwyneDeployEulerIntegration is Script {
     address eulerSwapper;
     address eulerSwapVerifier;
     address morpho;
+    address aavePool;
 
     address eulerCollateralVaultImpl;
     EthereumVaultConnector evc;
@@ -111,6 +112,7 @@ contract TwyneDeployEulerIntegration is Script {
             eulerSwapper = 0x2Bba09866b6F1025258542478C39720A09B728bF;
             // Morpho addresses are documented at: https://docs.morpho.org/get-started/resources/addresses#morpho-contracts
             morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+            aavePool = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
         } else if (block.chainid == 8453) { // base
             eulerUSDC = 0x0A1a3b5f2041F33522C4efc754a7D096f880eE16;
             eulerWETH = 0x859160DB5841E5cfB8D3f144C6b3381A85A4b410;
@@ -119,6 +121,7 @@ contract TwyneDeployEulerIntegration is Script {
             eulerSwapper = 0x0D3d0F97eD816Ca3350D627AD8e57B6AD41774df;
             // Morpho addresses are documented at: https://docs.morpho.org/get-started/resources/addresses#morpho-contracts
             morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+            aavePool = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
         } else {
             revert UnknownProfile();
         }
@@ -175,6 +178,7 @@ contract TwyneDeployEulerIntegration is Script {
         result = vm.serializeAddress("twyneAddresses", "deployerExampleCollateralVault", Addresses.deployerExampleCollateralVault);
         result = vm.serializeAddress("twyneAddresses", "healthStatViewer", Addresses.healthStatViewer);
         result = vm.serializeAddress("twyneAddresses", "leverageOperator", Addresses.leverageOperator);
+        result = vm.serializeAddress("twyneAddresses", "eulerWrapper", Addresses.eulerWrapper);
     }
 
     function newIntermediateVault(address _asset, address _oracle, address _unitOfAccount) internal returns (IEVault) {
@@ -183,7 +187,7 @@ contract TwyneDeployEulerIntegration is Script {
         log("New intermediate vault", address(new_vault));
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
-        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
+        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
         // Base=0.00% APY,  Kink(80.00% utilization)=6.00% APY  Max=500.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
             idealKinkInterestRate_: 600, // 6%
@@ -310,7 +314,7 @@ contract TwyneDeployEulerIntegration is Script {
 
         eulerCollateralVaultImpl = address(new EulerCollateralVault(address(evc), eulerUSDC));
 
-        healthViewer = new HealthStatViewer();
+        healthViewer = new HealthStatViewer(aavePool);
         vm.label(address(healthViewer), "healthViewer");
 
         // Deploy LeverageOperator
@@ -362,9 +366,11 @@ contract TwyneDeployEulerIntegration is Script {
         // Next: Deploy collateral vault
         deployer_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
         vm.stopBroadcast();

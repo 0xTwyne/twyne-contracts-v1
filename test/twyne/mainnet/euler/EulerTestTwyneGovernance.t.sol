@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.28;
 
-import {EulerTestBase} from "./EulerTestBase.t.sol";
+import {EulerTestBase, VaultType} from "./EulerTestBase.t.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -73,9 +73,11 @@ contract EulerTestNormalActions is EulerTestBase {
         // 5. Optionally, deploy an example collateral vault
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault(
+                VaultType.EULER_V2,
                 _collateralAsset,
                 _targetAsset,
-                twyneLiqLTV
+                twyneLiqLTV,
+                address(0)
             )
         );
         vm.stopPrank();

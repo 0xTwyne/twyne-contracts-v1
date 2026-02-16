@@ -41,7 +41,7 @@ contract MockCollateralVault is CollateralVaultBase {
         address __borrower,
         uint __liqLTV,
         VaultManager __vaultManager
-    ) external initializer override {
+    ) external initializer {
         __CollateralVaultBase_init(__asset, __borrower, __liqLTV, __vaultManager);
 
         eulerEVC.enableCollateral(address(this), address(__asset)); // necessary for Euler Finance EVK borrowing
@@ -49,6 +49,17 @@ contract MockCollateralVault is CollateralVaultBase {
         SafeERC20.forceApprove(IERC20(targetAsset), targetVault, type(uint).max); // necessary for repay()
         SafeERC20.forceApprove(IERC20(IEVault(address(__asset)).asset()), address(__asset), type(uint).max); // necessary for _depositUnderlying()
         emit T_CollateralVaultInitialized();
+    }
+
+    function _getExtLiqLTV(address _asset) internal view override returns (uint) {
+        return IEVault(targetVault).LTVLiquidation(_asset);
+    }
+
+    function _checkLiqLTV(uint _liqLTV, address _asset) internal view virtual override {
+        uint minLTV = IEVault(targetVault).LTVLiquidation(_asset);
+        uint buffer = uint(twyneVaultManager.externalLiqBuffers(_asset));
+        uint maxLTV = uint(twyneVaultManager.maxTwyneLTVs(_asset));
+        require(uint(minLTV) * buffer <= _liqLTV * MAXFACTOR && _liqLTV <= maxLTV, ValueOutOfRange());
     }
 
     /// @dev increment the version for proxy upgrades
@@ -118,6 +129,15 @@ contract MockCollateralVault is CollateralVaultBase {
     // Twyne Custom Liquidation Logic
     ///
 
+    function _getBC() internal view override returns (uint, uint) {
+        (, uint externalBorrowDebtValue) = IEVault(targetVault).accountLiquidity(address(this), true);
+
+        uint userCollateralValue = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+            totalAssetsDepositedOrReserved - maxRelease(), asset(), IEVault(intermediateVault).unitOfAccount());
+
+        return (externalBorrowDebtValue, userCollateralValue);
+    }
+
     /// @notice perform checks to determine if this collateral vault is liquidatable
     function _canLiquidate() internal view override returns (bool) {
         // Liquidation scenario 1: If close to liquidation trigger of target asset protocol, liquidate on Twyne
@@ -151,6 +171,15 @@ contract MockCollateralVault is CollateralVaultBase {
 
         // note to avoid divide by zero case, don't divide by borrowerOwnedCollateralValue
         return (externalBorrowDebtValue * MAXFACTOR > twyneLiqLTV * userCollateralValue);
+    }
+
+    function _convertBaseToCollateral(uint collateralValue) internal view virtual override returns (uint collateralAmount) {
+        collateralAmount = twyneVaultManager.oracleRouter().getQuote(
+                collateralValue,
+                IEVault(intermediateVault).unitOfAccount(),
+                asset()
+            );
+        return Math.min(totalAssetsDepositedOrReserved - maxRelease(), collateralAmount);
     }
 
     /// @notice custom balanceOf implementation

@@ -47,8 +47,12 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     modifier onlyBorrowerAndNotExtLiquidated() {
         _callThroughEVC();
         require(_msgSender() == borrower, ReceiverNotBorrower());
-        require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
+        require(_isNotExternallyLiquidated(), ExternallyLiquidated());
         _;
+    }
+
+    function _isNotExternallyLiquidated() internal view virtual returns (bool) {
+        return totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this));
     }
 
     modifier whenNotPaused() {
@@ -91,7 +95,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         intermediateVault = IEVault(_intermediateVault);
 
         // checkLiqLTV must happen after targetVault() and asset() return meaningful values
-        __vaultManager.checkLiqLTV(__liqLTV, targetVault, address(__asset));
+        _checkLiqLTV(__liqLTV, address(__asset));
         twyneLiqLTV = __liqLTV;
         SafeERC20.forceApprove(IERC20(__asset), _intermediateVault, type(uint).max); // necessary for EVK repay()
         evc.enableController(address(this), _intermediateVault); // necessary for Twyne EVK borrowing
@@ -100,12 +104,22 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         require(address(__asset) == IEVault(_intermediateVault).asset(), AssetMismatch());
     }
 
-    function initialize(
-        IERC20 __asset,
-        address __borrower,
-        uint __liqLTV,
-        VaultManager __vaultManager
-    ) external virtual;
+    /// @notice Returns external lending protocol's liquidation LTV
+    /// @param asset The collateral asset address
+    /// @return uint The liquidation LTV in 1e4 precision
+    function _getExtLiqLTV(address asset) internal view virtual returns (uint);
+
+    /// @notice Returns debt (B) and user collateral (C) in common unit of account (like USD)
+    /// @dev Used in liquidation calculations to determine borrower's claim
+    /// @return B The total debt value in common unit of account
+    /// @return C The user-owned collateral value in common unit of account
+    function _getBC() internal view virtual returns (uint B, uint C);
+
+    /// @notice Validates that the provided liqLTV is within acceptable bounds
+    /// @dev Ensures: externalLiqLTV * buffer <= liqLTV * MAXFACTOR && liqLTV <= maxLTV
+    /// @param liqLTV The liquidation LTV to validate
+    /// @param asset The collateral asset address
+    function _checkLiqLTV(uint liqLTV, address asset) internal view virtual;
 
     ///
     // ERC20-compatible functionality
@@ -298,12 +312,9 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
 
     /// @notice Deposits airdropped collateral asset.
     /// @dev This is the last step in a 1-click leverage batch.
-    function skim() external callThroughEVC whenNotPaused nonReentrant {
-        // copied from onlyBorrowerAndNotExtLiquidated modifier to cache balanceOf
-        require(_msgSender() == borrower, ReceiverNotBorrower());
+    function skim() external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         uint balance = IERC20(asset()).balanceOf(address(this));
         uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
-        require(_totalAssetsDepositedOrReserved <= balance, ExternallyLiquidated());
 
         createVaultSnapshot();
         totalAssetsDepositedOrReserved = balance;
@@ -322,11 +333,16 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         createVaultSnapshot();
 
         uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
+        uint maxWithdraw = _totalAssetsDepositedOrReserved - maxRelease();
         if (assets == type(uint).max) {
-            assets = _totalAssetsDepositedOrReserved - maxRelease();
+            assets = maxWithdraw;
+        } else {
+            require(assets <= maxWithdraw, T_WithdrawMoreThanMax());
         }
 
         totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
+
+
         SafeERC20.safeTransfer(IERC20(asset()), receiver, assets);
         _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
@@ -344,13 +360,23 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         createVaultSnapshot();
 
         uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
+        uint maxWithdraw = _totalAssetsDepositedOrReserved - maxRelease();
         if (assets == type(uint).max) {
-            assets = _totalAssetsDepositedOrReserved - maxRelease();
+            assets = maxWithdraw;
+        } else {
+            require(assets <= maxWithdraw, T_WithdrawMoreThanMax());
         }
 
         totalAssetsDepositedOrReserved = _totalAssetsDepositedOrReserved - assets;
-        underlying = IEVault(asset()).redeem(assets, receiver, address(this));
         _handleExcessCredit(_invariantCollateralAmount());
+
+        // redeem is done after _handleExcessCredit. This is to handle AaveV3 integration.
+        // Redeeming wrapped aTokens for underlying tokens and transfer them to the user.
+        // However, during high utilization of the intermediate pool, most aTokens may be
+        // transferred to collateral vaults and unavailable on the wrapped contract.
+        // NOTE: _handleExcessCredit() and _invariantCollateralAmount() should never rely on
+        // token balances since we now withdraw collateral asset after rebalancing.
+        underlying = IEVault(asset()).redeem(assets, receiver, address(this));
 
         evc.requireAccountAndVaultStatusCheck(address(this));
         emit T_RedeemUnderlying(assets, receiver);
@@ -363,7 +389,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     /// @notice allow the user to set their own vault's LTV
     function setTwyneLiqLTV(uint _ltv) external onlyBorrowerAndNotExtLiquidated whenNotPaused nonReentrant {
         createVaultSnapshot();
-        twyneVaultManager.checkLiqLTV(_ltv, targetVault, _asset);
+        _checkLiqLTV(_ltv, _asset);
         twyneLiqLTV = _ltv;
         _handleExcessCredit(_invariantCollateralAmount());
         evc.requireAccountAndVaultStatusCheck(address(this));
@@ -380,17 +406,80 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     // _canLiquidate() requires custom implementation per protocol integration
     function _canLiquidate() internal view virtual returns (bool);
 
+    /// @notice convert collateral from unit of account (like USD) to native asset units
+    /// @dev This fn is only used in `collateralForBorrower()` and before returning should
+    ///   take a min with `totalAssetsDepositedOrReserved - maxRelease()` since borrower cannot
+    ///   receive more than user owned collateral.
+    function _convertBaseToCollateral(uint collateralValue) internal view virtual returns (uint);
+
+    /// @notice Calculates the collateral to return to borrower during liquidation/handleExternalLiquidation
+    /// @dev Uses Twyne's dynamic liquidation incentive model (whitepaper eq 7.1):
+    ///   - Borrower receives: C * [1 - λ_t - i(λ_t)] where λ_t = B/C (Twyne LTV)
+    ///   - i(λ_t) is the dynamic liquidation incentive that varies based on health
+    ///
+    /// Three regimes based on borrower's LTV (λ_t = B/C):
+    ///
+    /// 1. λ_t >= λ̃^max_t (severely unhealthy): i = 1 - λ_t
+    ///    → Borrower gets: C * [1 - λ_t - (1 - λ_t)] = 0
+    ///    All remaining equity goes to liquidator as maximum incentive
+    ///
+    /// 2. λ_t <= β_safe * λ̃_e (healthy, no CLP reservation needed): i = 0
+    ///    → Borrower gets: C * [1 - λ_t - 0] = C - B
+    ///    No liquidation incentive; borrower keeps full equity
+    ///
+    /// 3. β_safe * λ̃_e < λ_t < λ̃^max_t (intermediate): linear interpolation
+    ///    i = (1 - λ̃^max_t) * (λ_t - β_safe * λ̃_e) / (λ̃^max_t - β_safe * λ̃_e)
+    ///    → Borrower gets: C * (1 - β_safe * λ̃_e) * (λ̃^max_t - λ_t) / (λ̃^max_t - β_safe * λ̃_e)
+    ///    Incentive grows linearly from 0 to (1 - λ̃^max_t) as LTV increases
+    ///
+    /// @param B debt in common unit of account (like USD)
+    /// @param C user collateral in common unit of account (like USD)
+    function collateralForBorrower(uint B, uint C) public view virtual returns (uint) {
+        address __asset = asset();
+        // liqLTV_e = β_safe * λ̃_e (in 1e8 precision: buffer is 1e4, extLiqLTV is 1e4)
+        uint liqLTV_e = uint(twyneVaultManager.externalLiqBuffers(__asset)) * _getExtLiqLTV(__asset); // 1e8 precision
+        // maxLTV_t = λ̃^max_t
+        uint maxLTV_t = uint(twyneVaultManager.maxTwyneLTVs(__asset)); // 1e4 precision
+
+        if (MAXFACTOR * B >= maxLTV_t * C) {
+            // Case 1: λ_t >= λ̃^max_t (MAXFACTOR * B / C >= maxLTV_t / MAXFACTOR)
+            // Borrower is severely unhealthy; all equity goes to liquidator
+            return 0;
+        } else if (MAXFACTOR * MAXFACTOR * B <= liqLTV_e * C) {
+            // Case 2: λ_t <= β_safe * λ̃_e (MAXFACTOR² * B / C <= liqLTV_e)
+            // Borrower is healthy; no liquidation incentive, keeps full equity (C - B)
+            return _convertBaseToCollateral(C - B);
+        } else {
+            // Case 3: Intermediate regime with linear interpolation
+            // Formula: C * (1 - β_safe * λ̃_e) * (λ̃^max_t - λ_t) / (λ̃^max_t - β_safe * λ̃_e)
+            // In code precision: (MAXFACTOR² - liqLTV_e) * (maxLTV_t * C - MAXFACTOR * B)
+            //                    / (MAXFACTOR * (MAXFACTOR * maxLTV_t - liqLTV_e))
+            return _convertBaseToCollateral(
+                (MAXFACTOR * MAXFACTOR - liqLTV_e) * (maxLTV_t * C - MAXFACTOR * B) /
+                (MAXFACTOR * (MAXFACTOR * maxLTV_t - liqLTV_e))
+            );
+        }
+    }
+
     /// @notice Begin the liquidation process for this vault.
     /// @dev Liquidation needs to be done in a batch.
-    /// If the vault is liquidatable, this fn makes liquidator the new borrower.
-    /// Liquidator is then responsible to make this position healthy.
-    /// Liquidator may choose to wind down the position and take collateral as profit.
+    /// @dev Liquidation uses dynamic liquidation incentive model:
+    ///   1. Liquidator must first transfer collateral to the borrower as compensation.
+    ///   2. The liquidator then becomes the new borrower of this vault.
+    ///   3. Liquidator is responsible to make the position healthy before the batch ends.
+    ///   4. Liquidator may wind down the position and keep remaining collateral as profit.
+    /// @dev The liquidator's profit comes from the difference between the collateral they
+    ///   receive (by becoming the vault owner) and the compensation paid to the borrower.
     function liquidate() external callThroughEVC nonReentrant {
         createVaultSnapshot();
-        require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
+        require(_isNotExternallyLiquidated(), ExternallyLiquidated());
+
         address liquidator = _msgSender();
         require(liquidator != borrower, SelfLiquidation());
         require(_canLiquidate(), HealthyNotLiquidatable());
+
+        (uint B, uint C) = _getBC();
+        SafeERC20Lib.safeTransferFrom(IERC20_Euler(asset()), liquidator, borrower, collateralForBorrower(B, C), permit2);
 
         // liquidator takes over this vault from the current borrower
         borrower = liquidator;
@@ -407,7 +496,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     /// token balance - if actual balance is less, external liquidation has occurred
     /// @return bool True if the vault has been externally liquidated, false otherwise
     function isExternallyLiquidated() external view nonReentrantView returns (bool) {
-        return totalAssetsDepositedOrReserved > IERC20(asset()).balanceOf(address(this));
+        return !_isNotExternallyLiquidated();
     }
 
     /// @notice Handles the aftermath of an external liquidation by the underlying lending protocol
@@ -433,8 +522,15 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
         unchecked { return totalAssetsDepositedOrReserved - __invariantCollateralAmount; }
     }
 
+    /// @notice Adjusts credit reserved from intermediate vault to match the invariant collateral amount
+    /// @dev If vault has excess credit (vaultAssets > invariant), repays the excess to intermediate vault
+    /// @dev If vault needs more credit (vaultAssets < invariant), borrows more from intermediate vault
+    /// @param __invariantCollateralAmount The target collateral amount to maintain invariants
     function _handleExcessCredit(uint __invariantCollateralAmount) internal virtual;
 
+    /// @notice Calculates the collateral amount required to maintain protocol invariants
+    /// @dev Formula: ceil(userCollateral * twyneLiqLTV * MAXFACTOR / (externalLiqLTV * buffer))
+    /// @return uint The amount of collateral assets the vault should hold
     function _invariantCollateralAmount() internal view virtual returns (uint);
 
     /// @notice Releases excess credit back to the intermediate vault
@@ -443,7 +539,7 @@ abstract contract CollateralVaultBase is EVCUtil, ReentrancyGuardUpgradeable, IE
     function rebalance() external callThroughEVC nonReentrant {
         uint __invariantCollateralAmount = _invariantCollateralAmount();
         require(totalAssetsDepositedOrReserved > __invariantCollateralAmount, CannotRebalance());
-        require(totalAssetsDepositedOrReserved <= IERC20(asset()).balanceOf(address(this)), ExternallyLiquidated());
+        require(_isNotExternallyLiquidated(), ExternallyLiquidated());
         _handleExcessCredit(__invariantCollateralAmount);
         emit T_Rebalance();
     }

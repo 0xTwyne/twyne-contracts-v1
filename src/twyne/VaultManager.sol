@@ -9,10 +9,13 @@ import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
 import {IEvents} from "src/interfaces/IEvents.sol";
 import {RevertBytes} from "euler-vault-kit/EVault/shared/lib/RevertBytes.sol";
-import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
-/// @title IRMLinearKink
+interface ICollateralVaultBase {
+    function asset() external view returns (address);
+}
+
+/// @title VaultManager
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @notice Manages twyne parameters that affect it globally: assets allowed, LTVs, interest rates.
 /// To be owned by Twyne multisig.
@@ -31,7 +34,9 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     mapping(address intermediateVault => address[] targetVaults) public allowedTargetVaultList;
 
-    uint[50] private __gap;
+    mapping(address intermediateVault => mapping(address targetVault => mapping(address targetAsset => bool))) public isAllowedTargetAssets;
+
+    uint[49] private __gap;
 
     modifier onlyCollateralVaultFactoryOrOwner() {
         require(msg.sender == owner() || msg.sender == collateralVaultFactory, CallerNotOwnerOrCollateralVaultFactory());
@@ -55,7 +60,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     /// @dev increment the version for proxy upgrades
     function version() external pure returns (uint) {
-        return 1;
+        return 2;
     }
 
     /// @notice Set oracleRouter address. Governance-only.
@@ -86,10 +91,19 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
     function setAllowedTargetVault(address _intermediateVault, address _targetVault) external onlyOwner {
-        require(IEVault(_intermediateVault).unitOfAccount() == IEVault(_targetVault).unitOfAccount(), AssetMismatch());
         isAllowedTargetVault[_intermediateVault][_targetVault] = true;
         allowedTargetVaultList[_intermediateVault].push(_targetVault);
         emit T_AddAllowedTargetVault(_intermediateVault, _targetVault);
+    }
+
+    /// @notice Set an allowed target asset for a specific intermediate vault. Governance-only.
+    /// @notice For Aave like protocol where targetVault can be used to borrow multiple assets
+    /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetVault The target vault that should be allowed for the intermediate vault.
+    /// @param _targetAsset The target asset to borrow
+    function setAllowedTargetAsset(address _intermediateVault, address _targetVault, address _targetAsset) external onlyOwner {
+        isAllowedTargetAssets[_intermediateVault][_targetVault][_targetAsset] = true;
+        emit  T_AddAllowedTargetVaultAsset(_intermediateVault, _targetVault, _targetAsset);
     }
 
     /// @notice Remove an allowed target vault for a specific intermediate vault. Governance-only.
@@ -145,7 +159,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
         external
         onlyCollateralVaultFactoryOrOwner
     {
-        require(CollateralVaultBase(_collateralVault).asset() == _intermediateVault.asset(), AssetMismatch());
+        require(ICollateralVaultBase(_collateralVault).asset() == _intermediateVault.asset(), AssetMismatch());
         _intermediateVault.setLTV(_collateralVault, _borrowLimit, _liquidationLimit, _rampDuration);
         emit T_SetLTV(address(_intermediateVault), _collateralVault, _borrowLimit, _liquidationLimit, _rampDuration);
     }
@@ -160,6 +174,17 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
         emit T_SetOracleResolvedVault(_vault, _allow);
     }
 
+    /// @notice Set new oracleRouter resolved vault value for any oracle router. Callable by governance or collateral vault factory.
+    /// @param _oracleRouter Oracle router which will be called by Vault Manager.
+    /// @param _vault EVK or collateral vault address. Must implement `convertToAssets()`.
+    /// @param _allow bool value to pass to govSetResolvedVault. True to configure the vault, false to clear the record.
+    /// @dev called by createCollateralVault() when a new collateral vault is created so collateral can be price properly.
+    /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.
+    function setOracleResolvedVaultForOracleRouter(address _oracleRouter, address _vault, bool _allow) external onlyCollateralVaultFactoryOrOwner {
+        EulerRouter(_oracleRouter).govSetResolvedVault(_vault, _allow);
+        emit T_SetOracleResolvedVault(_oracleRouter, _vault, _allow);
+    }
+
     /// @notice Perform an arbitrary external call. Governance-only.
     /// @dev VaultManager is an owner/admin of many contracts in the Twyne system.
     /// @dev This function helps Governance in case a specific a specific external function call was not implemented.
@@ -167,15 +192,6 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
         (bool success, bytes memory _data) = to.call{value: value}(data);
         if (!success) RevertBytes.revertBytes(_data);
         emit T_DoCall(to, value, data);
-    }
-
-    /// @notice Checks that the user-set LTV is within the min and max bounds.
-    /// @param _liqLTV The LTV that the user wants to use for their collateral vault.
-    /// @param _targetVault The target vault used for the borrow by collateral vault.
-    /// @param _collateralAddress The collateral asset used by collateral vault.
-    function checkLiqLTV(uint _liqLTV, address _targetVault, address _collateralAddress) external view {
-        uint16 minLTV = IEVault(_targetVault).LTVLiquidation(_collateralAddress);
-        require(uint(minLTV) * uint(externalLiqBuffers[_collateralAddress]) <= _liqLTV * MAXFACTOR && _liqLTV <= maxTwyneLTVs[_collateralAddress], ValueOutOfRange());
     }
 
     receive() external payable {}

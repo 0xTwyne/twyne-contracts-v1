@@ -2,7 +2,8 @@
 
 pragma solidity ^0.8.28;
 
-import {OverCollateralizedTestBase, console2, BridgeHookTarget} from "./OverCollateralizedTestBase.t.sol";
+import {EulerTestBase, console2} from "./EulerTestBase.t.sol";
+import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -13,6 +14,7 @@ import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
 import {Events} from "euler-vault-kit/EVault/shared/Events.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
+import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
 interface IWETH is IERC20 {
     receive() external payable;
@@ -20,7 +22,7 @@ interface IWETH is IERC20 {
     function withdraw(uint256 wad) external;
 }
 
-contract EulerLiquidationTest is OverCollateralizedTestBase {
+contract EulerLiquidationTest is EulerTestBase {
     uint256 BORROW_ETH_AMOUNT;
 
     function setUp() public override {
@@ -43,9 +45,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         vm.startPrank(alice);
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: liqLTV
+                _liqLTV: liqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -779,9 +783,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This confirms that a user with an existing vault can ALSO liquidate other vaults
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1006,15 +1012,24 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 1, alice))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 2, alice))  // when we add back credit risk manager, change -2 to -1.
         });
 
-        // liquidator didn't withdraw fully to satisfy invariants
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
         evc.batch(items);
+        // make full utilisation of intermediate vault so that intereset accrued increase intermediate vault debt
+        uint amountToWithdraw = IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault));
+        vm.startPrank(bob);
+        eeWETH_intermediate_vault.withdraw(amountToWithdraw, bob, bob);
+        vm.stopPrank();
+        assertEq(IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault)), 0, "Not at full utilisation");
 
-        items[2].data = abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice));
-        evc.batch(items);
+        assertEq(eeWETH_intermediate_vault.debtOf(address(alice_collateral_vault)), 1, "Intermediate vault debt is not correct");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), 3, "Total assets deposited or reserved is not correct");
+        assertEq(alice_collateral_vault.balanceOf(address(alice_collateral_vault)), 2, "Balance is not greater than 0");
+
+        vm.warp(block.timestamp + 1000 days);
+        // Rebalance to make sure excess credit is released back to intermediate vault
+        alice_collateral_vault.rebalance();
 
         // confirm vault ownership changed to liquidator
         assertEq(alice_collateral_vault.borrower(), liquidator, "Wrong collateral vault owner after liquidation");
@@ -1317,9 +1332,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This confirms that a user with an existing vault can ALSO liquidate other vaults
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1519,14 +1536,9 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 1, alice))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice))
         });
 
-        // liquidator didn't withdraw fully to satisfy invariants
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        evc.batch(items);
-
-        items[2].data = abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice));
         evc.batch(items);
 
         // confirm vault ownership changed to liquidator
@@ -1817,9 +1829,11 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
         // This confirms that a user with an existing vault can ALSO liquidate other vaults
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -2027,14 +2041,9 @@ contract EulerLiquidationTest is OverCollateralizedTestBase {
             targetContract: address(alice_collateral_vault),
             onBehalfOfAccount: liquidator,
             value: 0,
-            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw - 1, alice))
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice))
         });
 
-        // liquidator didn't withdraw fully to satisfy invariants
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        evc.batch(items);
-
-        items[2].data = abi.encodeCall(alice_collateral_vault.withdraw, (maxWithdraw, alice));
         evc.batch(items);
 
         // confirm vault ownership changed to liquidator

@@ -6,12 +6,13 @@ import {BatchScript} from "forge-safe/src/BatchScript.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {USD} from "euler-price-oracle/test/utils/EthereumAddresses.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
-import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
+import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_PULL_DEBT, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -25,7 +26,7 @@ import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/Upgradeable
 ///      It reads the deployed Twyne contract addresses from `TwyneAddresses_output.json`.
 ///      PHASE: Set to 0 for contract deployments, 1 configuring deployed contracts, 2 to verify configuration.
 contract TwyneAddVaultPair is BatchScript {
-    uint PHASE = 2; // this will revert, intentionally set this way to make the deployer explicitly set this value
+    uint PHASE = 10; // this will revert, intentionally set this way to make the deployer explicitly set this value
 
     // Contract addresses loaded from JSON
     CollateralVaultFactory collateralVaultFactory;
@@ -202,9 +203,11 @@ contract TwyneAddVaultPair is BatchScript {
         vm.startBroadcast(deployer);
         EulerCollateralVault deployer_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: _collateralAddress,
                 _targetVault: _targetAsset,
-                _liqLTV: 0.97e4
+                _liqLTV: 0.97e4,
+                _targetAsset: IEVault(_targetAsset).asset()
             })
         );
         vm.stopBroadcast();
@@ -271,7 +274,7 @@ contract TwyneAddVaultPair is BatchScript {
         console2.log("New intermediate vault", address(new_vault));
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
-        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
+        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
         // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
             idealKinkInterestRate_: 0, // 0%

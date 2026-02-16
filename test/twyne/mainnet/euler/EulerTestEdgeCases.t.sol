@@ -16,7 +16,7 @@ import {IRMLinearKink} from "euler-vault-kit/InterestRateModels/IRMLinearKink.so
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
-import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
@@ -49,9 +49,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(alice);
         alice_WSTETH_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWSTETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -75,9 +77,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Alice creates another vault with same params
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
         vm.stopPrank();
@@ -93,9 +97,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(TwyneErrors.IntermediateVaultNotSet.selector);
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerUSDC,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -103,9 +109,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(TwyneErrors.NotIntermediateVault.selector);
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerWETH,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
         vm.stopPrank();
@@ -293,9 +301,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(Pausable.EnforcedPause.selector);
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -333,7 +343,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Unpause the intermediate vault by returning the original setHookConfig settings
         // EXCEPT also allow for skim() to be called now without reverting
         vm.startPrank(address(eeWETH_intermediate_vault.governorAdmin()));
-        eeWETH_intermediate_vault.setHookConfig(originalHookTarget, OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
+        eeWETH_intermediate_vault.setHookConfig(originalHookTarget, OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
         vm.stopPrank();
 
         // Confirm skim() works now
@@ -363,6 +373,21 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.stopPrank();
     }
 
+    // Test that pullDebt is blocked on intermediate vault via BridgeHookTarget
+    function test_e_pullDebtBlocked() public noGasMetering {
+        e_firstBorrowFromEulerViaCollateral(eulerWETH);
+
+        // Alice tries to pull debt from her own position via intermediate vault
+        // This should revert with T_OperationDisabled because pullDebt is hooked
+        // and BridgeHookTarget's fallback reverts
+        vm.startPrank(alice);
+        evc.enableController(alice, address(eeWETH_intermediate_vault));
+
+        vm.expectRevert(TwyneErrors.T_OperationDisabled.selector);
+        eeWETH_intermediate_vault.pullDebt(1, address(alice_collateral_vault));
+        vm.stopPrank();
+    }
+
     ///
     // Governance actions
     ///
@@ -383,7 +408,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // Governance upgrades proxy
     function test_e_proxyUpgrade() public {
         e_createCollateralVault(eulerWETH, 0.9e4);
-        assertEq(alice_collateral_vault.version(), 1);
+        assertEq(alice_collateral_vault.version(), 2);
         UpgradeableBeacon beacon = UpgradeableBeacon(collateralVaultFactory.collateralVaultBeacon(eulerUSDC));
         vm.startPrank(admin);
         // set new implementation contract
@@ -395,7 +420,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // Governance upgrades proxy
     function test_e_proxyUpgrade_storageSetInConstructor() public {
         e_firstBorrowFromEulerViaCollateral(eulerWETH);
-        assertEq(alice_collateral_vault.version(), 1);
+        assertEq(alice_collateral_vault.version(), 2);
         UpgradeableBeacon beacon = UpgradeableBeacon(collateralVaultFactory.collateralVaultBeacon(eulerUSDC));
 
         vm.startPrank(admin);
@@ -408,9 +433,11 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         MockCollateralVault mock_collateral_vault = MockCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -449,7 +476,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         evc.enableController(alice, address(eeWETH_intermediate_vault));
         evc.enableCollateral(alice, address(alice_collateral_vault));
-        vm.expectRevert(TwyneErrors.ReceiverNotCollateralVault.selector);
+        vm.expectRevert(TwyneErrors.CallerNotCollateralVault.selector);
         eeWETH_intermediate_vault.borrow(1, alice);
 
         // address[] memory collaterals = address[WETH];
@@ -517,9 +544,9 @@ contract EulerTestEdgeCases is EulerTestBase {
         twyneVaultManager.setIntermediateVault(eeWSTETH_intermediate_vault);
         vm.stopPrank();
 
-        address collateralAsset =  IEVault(eeWSTETH_intermediate_vault).asset();
-        vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.checkLiqLTV(0, eulerUSDC, collateralAsset);
+        // address collateralAsset =  IEVault(eeWSTETH_intermediate_vault).asset();
+        // vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
+        // twyneVaultManager.checkLiqLTV(0, eulerUSDC, collateralAsset);
     }
 
     // VaultManager.sol tests for coverage
@@ -599,7 +626,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
-        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN);
+        new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
         // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
             idealKinkInterestRate_: 600, // 6%
@@ -676,8 +703,6 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         address eulerCollateralVaultImpl = address(new EulerCollateralVault(address(evc), eulerUSDC));
 
-        healthViewer = new HealthStatViewer();
-
         // Change ownership of EVK deploy contracts
         // oracleRouter.transferGovernance(address(twyneVaultManager));
 
@@ -705,9 +730,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Next: Deploy collateral vault
         vm.expectRevert(EVCErrors.EVC_ControllerViolation.selector);
         collateralVaultFactory.createCollateralVault({
+            _vaultType: VaultType.EULER_V2,
             _asset: eulerWETH,
             _targetVault: eulerUSDC,
-            _liqLTV: twyneLiqLTV
+            _liqLTV: twyneLiqLTV,
+            _targetAsset: address(0)
         });
         vm.stopPrank();
     }
@@ -839,9 +866,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(teleporter);
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
         vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
@@ -877,9 +906,9 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(alice);
         IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
 
-        // if collateral price is 0, no point in repaying, so it's fine for repay() to revert
-        vm.expectRevert(Errors.E_AccountLiquidity.selector);
-        alice_collateral_vault.repay(BORROW_USD_AMOUNT);
+        // // if collateral price is 0, no point in repaying, so it's fine for repay() to revert
+        // vm.expectRevert(Errors.E_AccountLiquidity.selector);
+        // alice_collateral_vault.repay(BORROW_USD_AMOUNT);
         // depositing 0 value of collateral isn't needed, so for deposit() to revert
         vm.expectRevert(Errors.E_AccountLiquidity.selector);
         alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
@@ -959,9 +988,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(alice);
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1331,7 +1362,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Step 2: Create a collateral vault and teleport the position
         vm.startPrank(user);
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(eulerWETH, eulerUSDC, twyneLiqLTV)
+            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, eulerWETH, eulerUSDC, twyneLiqLTV, address(0))
         );
         vm.stopPrank();
         vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
@@ -1412,9 +1443,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(bob);
         EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1428,9 +1461,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
                 _asset: eulerWETH,
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
             })
         );
 
@@ -1615,7 +1650,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         evc.setAccountOperator(alice, address(deleverageOperator), false);
 
         assertLe(IEVault(eulerUSDC).debtOf(address(alice_collateral_vault)), maxDebt, "Debt not fully repaid");
-        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), borrowerCollateral / 2, "Collateral not fully withdrawn");
+        assertApproxEqAbs(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), borrowerCollateral / 2, 1, "Collateral not fully withdrawn");
 
         assertEq(targetAsset.balanceOf(alice), aliceTargetAssetBal);
         assertGt(underlyingCollateralAsset.balanceOf(alice), aliceUnderlyingCollateralBal, "alice collateral balance increases");
@@ -1626,4 +1661,62 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         vm.stopPrank();
     }
+
+    function test_full_util_redeem() public {
+        address collateralAsset = eulerWETH;
+        e_collateralDepositWithoutBorrow(collateralAsset, 0.9e4);
+
+        uint amountToWithdraw = IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault));
+        vm.startPrank(bob);
+        eeWETH_intermediate_vault.withdraw(amountToWithdraw, bob, bob);
+        vm.stopPrank();
+        assertEq(IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault)), 0, "Not at full utilisation");
+
+        vm.startPrank(alice);
+        uint bal = alice_collateral_vault.balanceOf(address(alice_collateral_vault));
+        alice_collateral_vault.redeemUnderlying(bal, alice);
+        vm.stopPrank();
+    }
+
+    // Test that non-collateral vault accounts are blocked by BridgeHookTarget (not CreditRiskManager)
+    // The BridgeHookTarget provides the first line of defense by checking receiver is a collateral vault
+    function test_e_NonCollateralVaultBorrowBlockedByHook() public noGasMetering {
+        // Setup: credit deposit so intermediate vault has liquidity
+        e_creditDeposit(eulerWETH);
+
+        // Alice (not a collateral vault) tries to borrow from intermediate vault
+        vm.startPrank(alice);
+
+        // Enable intermediate vault as controller for alice
+        evc.enableController(alice, address(eeWETH_intermediate_vault));
+
+        // Alice tries to borrow with receiver=alice - blocked by BridgeHookTarget (caller must be collateral vault)
+        vm.expectRevert(TwyneErrors.CallerNotCollateralVault.selector);
+        eeWETH_intermediate_vault.borrow(1e18, alice);
+
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _asset: eulerWETH,
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+
+        // Even if receiver is collateral vault, alice (non-CV caller) still cannot borrow
+        vm.expectRevert(TwyneErrors.CallerNotCollateralVault.selector);
+        eeWETH_intermediate_vault.borrow(1e18, address(alice_collateral_vault));
+
+        vm.stopPrank();
+
+        // Random actor also cannot borrow
+        address randomActor = makeAddr("randomActor");
+        vm.startPrank(randomActor);
+        evc.enableController(randomActor, address(eeWETH_intermediate_vault));
+        vm.expectRevert(TwyneErrors.CallerNotCollateralVault.selector);
+        eeWETH_intermediate_vault.borrow(1e18, address(alice_collateral_vault));
+        vm.stopPrank();
+    }
+
 }

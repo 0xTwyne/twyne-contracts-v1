@@ -74,7 +74,7 @@ contract HealthStatViewer {
             if (liabilityValue == 0) extHF = type(uint).max;
             else {
                 if (healthFactor > type(uint).max / MAXFACTOR) extHF = type(uint).max;
-                extHF = uint(twyneVaultManager.externalLiqBuffers(asset)) * healthFactor / MAXFACTOR;
+                else extHF = uint(twyneVaultManager.externalLiqBuffers(asset)) * healthFactor / MAXFACTOR;
             }
 
             externalBorrowDebtValue = liabilityValue * 1e10; // multiply by 1e10 to match Euler precision (1e18)

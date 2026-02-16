@@ -1,4 +1,10 @@
 {
+  "lib/aave-v3-origin": {
+    "tag": {
+      "name": "v3.5.0",
+      "rev": "6138e1fda45884b6547d094a1ddeef43dcab4977"
+    }
+  },
   "lib/euler-price-oracle": {
     "rev": "f52cb43b587c7fa90a7e722d52698003451feb62"
   },

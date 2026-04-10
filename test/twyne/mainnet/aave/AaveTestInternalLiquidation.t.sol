@@ -55,9 +55,10 @@ contract AaveTestInternalLiquidation is AaveTestBase {
     function createInitialPosition(uint256 C, uint256/* CLP */, uint256 B, uint256 twyneLTV) public {
         // Pre-setup checks
         uint16 minLTV = uint16(getLiqLTV(address(aWETHWrapper), USDC));
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(aWETHWrapper));
+        address intermediateVault = intermediateVaultFor[address(aWETHWrapper)];
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
         require(uint256(minLTV) * uint256(extLiqBuffer) <= uint256(twyneLTV) * MAXFACTOR, "precond fail");
-        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(address(aWETHWrapper)), "twyneLTV too high");
+        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault), "twyneLTV too high");
 
         // Bob deposits into intermediate vault to earn boosted yield
         aave_creditDeposit(address(aWETHWrapper));
@@ -66,7 +67,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLTV,
                 _targetAsset: USDC
@@ -117,6 +118,49 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         MockAaveFeed mockAaveFeed = new MockAaveFeed();
         vm.etch(wethFeed, address(mockAaveFeed).code);
         MockAaveFeed(wethFeed).setPrice(newPrice);
+    }
+
+    function _setWethPrice(uint256 newPrice) internal {
+        address wethFeed = getAaveOracleFeed(WETH);
+        MockAaveFeed mockAaveFeed = new MockAaveFeed();
+        vm.etch(wethFeed, address(mockAaveFeed).code);
+        MockAaveFeed(wethFeed).setPrice(newPrice);
+    }
+
+    function _liqLTVExternalBps() internal view returns (uint256) {
+        uint256 buffer = uint256(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault())));
+        uint256 extLiqLtv = getLiqLTV(address(aWETHWrapper), USDC);
+        return (buffer * extLiqLtv) / MAXFACTOR;
+    }
+
+    function _interpolationTargetLTVBps(uint256 numerator, uint256 denominator) internal view returns (uint256) {
+        uint256 liqLTV_e_bps = _liqLTVExternalBps();
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault())));
+        return liqLTV_e_bps + (maxLTV_t - liqLTV_e_bps) * numerator / denominator;
+    }
+
+    function _setWethPriceForTargetLTV(uint256 targetLtvBps) internal {
+        require(targetLtvBps > 0, "targetLTV=0");
+        (uint256 B, uint256 C) = _getBC();
+        require(B > 0 && C > 0, "no BC");
+
+        uint256 currentLtvBps = (B * MAXFACTOR) / C;
+        uint256 currentOraclePrice = getAavePrice(WETH);
+        uint256 newOraclePrice = (currentOraclePrice * currentLtvBps) / targetLtvBps;
+        require(newOraclePrice > 0, "price=0");
+        _setWethPrice(newOraclePrice);
+    }
+
+    function _maxBorrowForCollateral(uint256 collateralAmount, uint256 twyneLTVBps) internal view returns (uint256) {
+        uint256 wethPrice = getAavePrice(WETH);
+        uint256 usdcPrice = getAavePrice(USDC);
+        uint256 borrowLTV = getBorrowLTV(address(aWETHWrapper));
+        uint256 effectiveLTV = twyneLTVBps < borrowLTV ? twyneLTVBps : borrowLTV;
+
+        uint256 collateralValueBase = (collateralAmount * wethPrice) / 1e18;
+        uint256 maxDebtBase = (collateralValueBase * effectiveLTV) / MAXFACTOR;
+        uint256 maxDebtForCollateral = (maxDebtBase * 1e6) / usdcPrice;
+        return (maxDebtForCollateral * 95) / 100;
     }
 
     function setup_approve_customSetup() internal {
@@ -187,12 +231,10 @@ contract AaveTestInternalLiquidation is AaveTestBase {
     function _assertInterpolating() internal view {
         (uint256 B, uint256 C) = _getBC();
         
-        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(aWETHWrapper))) 
+        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(aaveEthVault))) 
             * uint256(getLiqLTV(address(aWETHWrapper), USDC)); 
             
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(aWETHWrapper))); // 1e4 precision
-
-        uint256 currentLTV = C > 0 ? (B * MAXFACTOR * MAXFACTOR) / C : 0; 
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(aaveEthVault))); // 1e4 precision
 
         uint256 currentLTV_1e8 = C > 0 ? (B * 1e8) / C : 0;
 
@@ -242,7 +284,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         console2.log("awethWrapperPrice (base currency)", awethWrapperPrice);
         
         // Log Aave-specific liquidation LTV for Python model
-        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(aWETHWrapper))) 
+        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(aaveEthVault))) 
             * uint256(getLiqLTV(address(aWETHWrapper), USDC));
         console2.log("liqLTV_e (external liquidation LTV, 1e8)", liqLTV_e);
     }
@@ -309,9 +351,9 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         uint256 rawBase = LiquidationMath.borrowerCollateralBase(
             B,
             C,
-            twyneVaultManager.externalLiqBuffers(address(aWETHWrapper)),
+            twyneVaultManager.externalLiqBuffers(address(aaveEthVault)),
             getLiqLTV(address(aWETHWrapper), USDC),
-            twyneVaultManager.maxTwyneLTVs(address(aWETHWrapper))
+            twyneVaultManager.maxTwyneLTVs(address(aaveEthVault))
         );
 
         console2.log("B (totalDebtBase)", B);
@@ -386,14 +428,16 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     // LTV at upper limit before interpolation (Aave analog of Euler case01)
     function test_a_expectRevert_internalLiquidation_case01() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        uint256 borrowAmount = _maxBorrowForCollateral(5e18, 9000);
+        createInitialPosition(5e18, 0, borrowAmount, 9000);
 
         // Warp a bit to avoid edge-time assumptions in downstream integrations
         vm.warp(block.timestamp + 1);
 
-        // This is intentionally tuned to be just below liquidation threshold for Aave base-currency math.
-        // If it ever drifts (fork state changes), the `assertFalse(canLiquidate())` will catch it.
-        executePriceDrop(9);
+        // Keep LTV slightly below external liquidation threshold to stay healthy.
+        uint256 liqLTV_e_bps = _liqLTVExternalBps();
+        uint256 targetLtvBps = liqLTV_e_bps > 50 ? liqLTV_e_bps - 50 : liqLTV_e_bps / 2;
+        _setWethPriceForTargetLTV(targetLtvBps);
 
         setup_approve_customSetup();
 
@@ -407,8 +451,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_case10() external noGasMetering {
         createInitialPosition(5e18, 0, 12000e6, 8500);
-        
-        executePriceDrop(32);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(1, 5));
         
         _assertInterpolating();
         
@@ -420,8 +463,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_case11() external noGasMetering {
         createInitialPosition(5e18, 0, 12000e6, 8500);
-        
-        executePriceDrop(34);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(2, 5));
         
         _assertInterpolating();
         
@@ -433,8 +475,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_case12() external noGasMetering {
         createInitialPosition(5e18, 0, 12000e6, 8500);
-        
-        executePriceDrop(35);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(3, 5));
         
         _assertInterpolating();
         
@@ -446,8 +487,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_case13() external noGasMetering {
         createInitialPosition(5e18, 0, 12000e6, 8500);
-        
-        executePriceDrop(36);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(4, 5));
         
         _assertInterpolating();
         
@@ -461,8 +501,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
     // this validates the idea that interpolation is not affected by liq ltv
     function test_a_internalLiquidation_case14() external noGasMetering {
         createInitialPosition(5e18, 0, 12000e6, 9000);
-        
-        executePriceDrop(35);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(4, 5));
         
         _assertInterpolating();
         
@@ -474,8 +513,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_case15() external noGasMetering {
         createInitialPosition(5e18, 0, 12000e6, 9000);
-        
-        executePriceDrop(36);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(9, 10));
         
         _assertInterpolating();
         
@@ -529,7 +567,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
         // Ensure we are in the "fully liquidated" branch (MAXFACTOR * B >= maxLTV_t * C)
         (uint256 B, uint256 C) = _getBC();
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(aWETHWrapper)));
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(aaveEthVault)));
         assertTrue(MAXFACTOR * B >= maxLTV_t * C, "not in fully-liquidated branch");
 
         setup_approve_customSetup();
@@ -589,8 +627,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         // Dust-scale position: ~0.001 WETH collateral, ~2.2 USDC debt
         // Tuned so post-drop LTV lands in the interpolation band (β_safe*λ̃_e < LTV < λ̃_t^max).
         createInitialPosition(1e15, 0, 22e5, 8500);
-
-        executePriceDrop(37);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(1, 5));
         _assertInterpolating();
         assertTrue(alice_aave_vault.canLiquidate(), "vault should be liquidatable (lowValues case10)");
 
@@ -605,8 +642,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_lowValues_case11() external noGasMetering {
         createInitialPosition(1e15, 0, 22e5, 8500);
-
-        executePriceDrop(38);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(2, 5));
         _assertInterpolating();
         assertTrue(alice_aave_vault.canLiquidate(), "vault should be liquidatable (lowValues case11)");
 
@@ -621,8 +657,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_lowValues_case12() external noGasMetering {
         createInitialPosition(1e15, 0, 22e5, 8500);
-
-        executePriceDrop(39);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(3, 5));
         _assertInterpolating();
         assertTrue(alice_aave_vault.canLiquidate(), "vault should be liquidatable (lowValues case12)");
 
@@ -637,8 +672,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
 
     function test_a_internalLiquidation_lowValues_case13() external noGasMetering {
         createInitialPosition(1e15, 0, 22e5, 8500);
-
-        executePriceDrop(40);
+        _setWethPriceForTargetLTV(_interpolationTargetLTVBps(4, 5));
         _assertInterpolating();
         assertTrue(alice_aave_vault.canLiquidate(), "vault should be liquidatable (lowValues case13)");
 
@@ -658,8 +692,8 @@ contract AaveTestInternalLiquidation is AaveTestBase {
     /// @dev Aave-adapted version of Euler's Python V2 scenario #1 (96% LTV vs 95% threshold)
     function test_a_replicatePythonV2Liquidation_test1() external noGasMetering {
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(address(aWETHWrapper), 0.99e4); // 99%
-        twyneVaultManager.setMaxLiquidationLTV(address(aWETHWrapper), 0.97e4); // 97%
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), 0.99e4, 0); // 99%
+        twyneVaultManager.setMaxLiquidationLTV(address(aaveEthVault), 0.97e4, 0); // 97%
         vm.stopPrank();
 
         // Target: C ~= 10,000 base units, B ~= 9,600 base units, liquidation threshold 95%
@@ -695,8 +729,8 @@ contract AaveTestInternalLiquidation is AaveTestBase {
     /// @dev Aave-adapted version of Euler's Python V2 scenario #2 (93.5% LTV vs 92% threshold)
     function test_a_replicatePythonV2Liquidation_test2() external noGasMetering {
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(address(aWETHWrapper), 0.99e4); // 99%
-        twyneVaultManager.setMaxLiquidationLTV(address(aWETHWrapper), 0.97e4); // 97%
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), 0.99e4, 0); // 99%
+        twyneVaultManager.setMaxLiquidationLTV(address(aaveEthVault), 0.97e4, 0); // 97%
         vm.stopPrank();
 
         // Target: C ~= 10,000 base units, B ~= 9,350 base units, liquidation threshold 92%
@@ -752,7 +786,7 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         assertLe(result, availableUserCollateral, "result should be capped by user collateral");
 
         // If fully liquidated (LTV >= maxLTV_t), result should be 0
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(aWETHWrapper)));
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(aaveEthVault)));
         if (MAXFACTOR * B >= maxLTV_t * C) {
             assertEq(result, 0, "fully liquidated position should return 0");
         }
@@ -779,10 +813,18 @@ contract AaveTestInternalLiquidation is AaveTestBase {
         collateralAmount = bound(collateralAmount, 1e18, 7e18);
         twyneLTV = uint16(bound(twyneLTV, 8500, 9300));
 
-        // Conservative estimate: 1 WETH ≈ $3500
-        uint256 maxDebtForCollateral = (collateralAmount * 3500e6 * twyneLTV) / (1e18 * 10000);
+        uint256 wethPrice = getAavePrice(WETH);
+        uint256 usdcPrice = getAavePrice(USDC);
+        uint256 borrowLTV = getBorrowLTV(address(aWETHWrapper));
+        uint256 effectiveLTV = twyneLTV < borrowLTV ? twyneLTV : borrowLTV;
+
+        uint256 collateralValueBase = (collateralAmount * wethPrice) / 1e18;
+        uint256 maxDebtBase = (collateralValueBase * effectiveLTV) / MAXFACTOR;
+        uint256 maxDebtForCollateral = (maxDebtBase * 1e6) / usdcPrice;
+        maxDebtForCollateral = (maxDebtForCollateral * 95) / 100;
         uint256 minDebt = 1e6;
         uint256 maxDebt = maxDebtForCollateral < 20_000e6 ? maxDebtForCollateral : 20_000e6;
+        vm.assume(maxDebt >= minDebt);
         debtAmount = bound(debtAmount, minDebt, maxDebt);
 
         // executePriceDrop() interprets this as percentage points (0..100)

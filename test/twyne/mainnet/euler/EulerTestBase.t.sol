@@ -34,6 +34,8 @@ contract EulerTestBase is MainnetBase {
     IEVault eeWSTETH_intermediate_vault;
     EulerWrapper eulerWrapper;
 
+    mapping(address => address) intermediateVaultFor;
+
     LeverageOperator leverageOperator;
     DeleverageOperator deleverageOperator;
     LeverageOperator_EulerFL leverageOperator_EulerFL;
@@ -93,12 +95,13 @@ contract EulerTestBase is MainnetBase {
 
         for (uint collateralIndex; collateralIndex<fixtureCollateralAssets.length; collateralIndex++) {
             address collateralAsset = fixtureCollateralAssets[collateralIndex];
-            twyneVaultManager.setMaxLiquidationLTV(collateralAsset, maxLTVInitial);
-            twyneVaultManager.setExternalLiqBuffer(collateralAsset, externalLiqBufferInitial);
             // First, create the intermediate vault for each collateral asset
             IEVault intermediateVault = newIntermediateVault(collateralAsset, address(oracleRouter), USD);
+            intermediateVaultFor[collateralAsset] = address(intermediateVault);
             string memory intermediate_vault_label = string.concat(IEVault(collateralAsset).symbol(), " intermediate vault");
             vm.label(address(intermediateVault), intermediate_vault_label);
+            twyneVaultManager.setMaxLiquidationLTV(address(intermediateVault), maxLTVInitial, 0);
+            twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), externalLiqBufferInitial, 0);
             // Now make sure the intermediate vault is allowed to borrow all target assets
             for (uint targetIndex; targetIndex<fixtureTargetAssets.length; targetIndex++) {
                 require(IEVault(fixtureTargetAssets[targetIndex]).LTVBorrow(intermediateVault.asset()) != 0, InvalidCollateral());
@@ -107,10 +110,10 @@ contract EulerTestBase is MainnetBase {
         }
 
         // Get created eeWETH intermediate vault
-        eeWETH_intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWETH));
+        eeWETH_intermediate_vault = IEVault(intermediateVaultFor[eulerWETH]);
 
         // Get created eeWSTETH intermediate vault
-        eeWSTETH_intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWSTETH));
+        eeWSTETH_intermediate_vault = IEVault(intermediateVaultFor[eulerWSTETH]);
 
         // set targetAsset -> USD oracle, specifically for the partial external liquidation edge case
         // twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(eulerUSDC).asset(), USD, address(eulerExternalOracle))));
@@ -216,12 +219,11 @@ contract EulerTestBase is MainnetBase {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
-        // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0,
+            linearParameter_: 750,
+            polynomialParameter_: 49250,
+            nonlinearPoint_: 5e17
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
@@ -235,7 +237,7 @@ contract EulerTestBase is MainnetBase {
         eulerExternalOracle = EulerRouter(EulerRouter(IEVault(_asset).oracle()).getConfiguredOracle(IEVault(_asset).asset(), USD));
         assertTrue(keccak256(abi.encodePacked(eulerExternalOracle.name())) == keccak256(abi.encodePacked("ChainlinkOracle")) || keccak256(abi.encodePacked(eulerExternalOracle.name())) == keccak256(abi.encodePacked("CrossAdapter"))); // if oracle is not chainlink, then cool-off period is recommended
         twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_asset).asset(), USD, address(eulerExternalOracle))));
-        twyneVaultManager.setIntermediateVault(new_vault);
+        twyneVaultManager.setIntermediateVault(new_vault, true);
         new_vault.setGovernorAdmin(address(twyneVaultManager));
 
         assertEq(new_vault.configFlags() & CFG_DONT_SOCIALIZE_DEBT, 0, "debt isn't socialized");
@@ -248,7 +250,8 @@ contract EulerTestBase is MainnetBase {
     function getReservedAssets(uint256 depositAmountWETH, EulerCollateralVault collateralVault) internal view returns (uint reservedAssets) {
         address targetVault = collateralVault.targetVault();
         address collateralAsset = collateralVault.asset();
-        uint externalLiqBuffer =  uint(collateralVault.twyneVaultManager().externalLiqBuffers(collateralAsset));
+        address intermediateVault = address(collateralVault.intermediateVault());
+        uint externalLiqBuffer = uint(collateralVault.twyneVaultManager().externalLiqBuffers(intermediateVault));
         uint liqLTV_twyne = collateralVault.twyneLiqLTV();
 
         return getReservedAssets(depositAmountWETH, targetVault, collateralAsset, externalLiqBuffer, liqLTV_twyne);
@@ -275,7 +278,7 @@ contract EulerTestBase is MainnetBase {
     // parent
     function e_creditDeposit(address collateralAssets) public noGasMetering {
         vm.assume(isValidCollateralAsset(collateralAssets));
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
         // Bob deposits into intermediate_vault to earn boosted yield
         vm.startPrank(bob);
         IERC20(collateralAssets).approve(address(intermediate_vault), type(uint256).max);
@@ -296,9 +299,10 @@ contract EulerTestBase is MainnetBase {
         // copy logic from checkLiqLTV
         vm.assume(isValidCollateralAsset(collateralAssets));
         uint16 minLTV = IEVault(eulerUSDC).LTVLiquidation(collateralAssets);
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(collateralAssets);
+        address intermediateVault = intermediateVaultFor[collateralAssets];
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(collateralAssets));
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault));
 
         e_creditDeposit(collateralAssets);
 
@@ -307,7 +311,7 @@ contract EulerTestBase is MainnetBase {
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: eulerUSDC,
                 _liqLTV: liqLTV,
                 _targetAsset: address(0)
@@ -321,7 +325,7 @@ contract EulerTestBase is MainnetBase {
     // parent
     function e_totalAssetsIntermediateVault(address collateralAssets, uint16 liqLTV) public noGasMetering {
         e_createCollateralVault(collateralAssets, liqLTV);
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
         // eve donates to collateral vault, ensure this doesn't increase its totalAssets
         vm.startPrank(eve);
         // balanceOf before and after the transfer of eWETH is unchanged
@@ -360,7 +364,7 @@ contract EulerTestBase is MainnetBase {
     // Verify that the EVK supply cap works as expected (already handled by EVK tests, but let's demonstrate it here)
     function e_supplyCap_creditDeposit(address collateralAssets) public noGasMetering {
         vm.assume(isValidCollateralAsset(collateralAssets));
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         vm.startPrank(address(intermediate_vault.governorAdmin()));
         uint16 supplyCap = 32000 + IERC20(IEVault(collateralAssets).asset()).decimals();
@@ -381,7 +385,7 @@ contract EulerTestBase is MainnetBase {
     // parent
     function e_second_creditDeposit(address collateralAssets) public noGasMetering {
         e_creditDeposit(collateralAssets);
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
         // Bob deposits more into eeWETH_intermediate_vault to earn boosted yield
         vm.startPrank(bob);
         intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
@@ -397,7 +401,7 @@ contract EulerTestBase is MainnetBase {
     // 100% can be withdrawn if there is no reserved assets in any collateral vault
     function e_creditWithdrawNoInterest(address collateralAssets) public noGasMetering {
         e_creditDeposit(collateralAssets);
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         assertEq(intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT, "totalAssets isn't the expected value");
         assertEq(intermediate_vault.balanceOf(bob), CREDIT_LP_AMOUNT, "bob has wrong balance");
@@ -449,7 +453,7 @@ contract EulerTestBase is MainnetBase {
         vm.assume(warpBlockAmount < forkBlockDiff);
         e_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         // Confirm fees setup
         assertEq(intermediate_vault.interestFee(), 0, "Unexpected intermediate vault interest fee");
@@ -521,7 +525,7 @@ contract EulerTestBase is MainnetBase {
     function e_creditWithdrawWithInterestAndFees(address collateralAssets) public noGasMetering {
         e_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         // Set non-zero protocolConfig fee
         vm.startPrank(admin);
@@ -611,11 +615,11 @@ contract EulerTestBase is MainnetBase {
 
         uint256 borrowAmountInETH = Math.min(
             oneEther * uint(IEVault(eulerUSDC).LTVBorrow(collateralAssets)) / MAXFACTOR,
-            oneEther * uint(IEVault(eulerUSDC).LTVLiquidation(collateralAssets)) * uint(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) / (MAXFACTOR * MAXFACTOR)
+            oneEther * uint(IEVault(eulerUSDC).LTVLiquidation(collateralAssets)) * uint(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()))) / (MAXFACTOR * MAXFACTOR)
         );
 
         // Some shared logic with test_e_maxBorrowFromEulerDirect()
-        alice_collateral_vault.setTwyneLiqLTV(uint(IEVault(eulerUSDC).LTVLiquidation(collateralAssets)) * uint(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) / MAXFACTOR);
+        alice_collateral_vault.setTwyneLiqLTV(uint(IEVault(eulerUSDC).LTVLiquidation(collateralAssets)) * uint(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()))) / MAXFACTOR);
         uint borrowValueInUSD = eulerOnChain.getQuote(borrowAmountInETH, collateralAssets, USD);
         uint USDCPrice = eulerOnChain.getQuote(1, USDC, USD); // returns a value times 1e10
         uint borrowAmountInUSDC = borrowValueInUSD / USDCPrice;
@@ -682,7 +686,7 @@ contract EulerTestBase is MainnetBase {
         vm.startPrank(user);
         address user_collateral_vault = collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -743,7 +747,7 @@ contract EulerTestBase is MainnetBase {
         vm.startPrank(user);
         address user_collateral_vault = collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -800,7 +804,7 @@ contract EulerTestBase is MainnetBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2,collateralAssets, eulerUSDC, twyneLiqLTV, address(0)))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, intermediateVaultFor[collateralAssets], eulerUSDC, twyneLiqLTV, address(0)))
         });
         (IEVC.BatchItemResult[] memory batchItemsResult,,) = evc.batchSimulation(items);
         address collateral_vault = address(uint160(uint(bytes32(batchItemsResult[0].result))));
@@ -1022,7 +1026,7 @@ contract EulerTestBase is MainnetBase {
 
         uint snapshot = vm.snapshotState();
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(collateralAssets, 0.95e4);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.95e4, 0);
         vm.stopPrank();
 
         vm.startPrank(alice);
@@ -1041,7 +1045,7 @@ contract EulerTestBase is MainnetBase {
 
         // Use the first liquidation condition in _canLiquidate
         (uint256 externalCollateralValueScaledByLiqLTV, ) = IEVault(alice_collateral_vault.targetVault()).accountLiquidity(address(alice_collateral_vault), true);
-        uint256 borrowAmountUSD = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) * externalCollateralValueScaledByLiqLTV / MAXFACTOR;
+        uint256 borrowAmountUSD = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()))) * externalCollateralValueScaledByLiqLTV / MAXFACTOR;
 
         uint USDCPrice = eulerOnChain.getQuote(1, USDC, USD); // returns a value times 1e10
         uint borrowAmountUSDC = borrowAmountUSD / USDCPrice;
@@ -1055,7 +1059,7 @@ contract EulerTestBase is MainnetBase {
         vm.revertToState(snapshot);
 
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(collateralAssets, 1e4);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 1e4, 0);
         vm.stopPrank();
 
         vm.startPrank(alice);
@@ -1253,7 +1257,7 @@ contract EulerTestBase is MainnetBase {
         EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1296,7 +1300,7 @@ contract EulerTestBase is MainnetBase {
 
         vm.startPrank(alice);
         // Toggle LTV before any borrows exist
-        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset()));
+        alice_collateral_vault.setTwyneLiqLTV(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault())));
         vm.stopPrank();
     }
 
@@ -1313,7 +1317,7 @@ contract EulerTestBase is MainnetBase {
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         alice_collateral_vault.setTwyneLiqLTV(1e4);
 
-        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset());
+        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()));
         alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 200);
         alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 400);
         alice_collateral_vault.setTwyneLiqLTV(cachedMaxTwyneLTV);
@@ -1323,7 +1327,7 @@ contract EulerTestBase is MainnetBase {
     function e_teleportEulerPosition(address collateralAssets) public noGasMetering {
         e_creditDeposit(collateralAssets);
 
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         uint C = 10 ether;
         uint B = 5000 * (10**6);
@@ -1347,7 +1351,7 @@ contract EulerTestBase is MainnetBase {
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1372,14 +1376,14 @@ contract EulerTestBase is MainnetBase {
 
         vm.revertToState(snapshot);
         uint16 eulerUSDCLiqLTV = IEVault(eulerUSDC).LTVLiquidation(collateralAssets);
-        uint safeLiqLTV_ext = uint(eulerUSDCLiqLTV) * uint(twyneVaultManager.externalLiqBuffers(collateralAssets)); // 1e8 precision
+        uint safeLiqLTV_ext = uint(eulerUSDCLiqLTV) * uint(twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault))); // 1e8 precision
 
         // teleport position
         vm.startPrank(teleporter);
         teleporter_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: eulerUSDC,
                 _liqLTV: safeLiqLTV_ext / MAXFACTOR,
                 _targetAsset: address(0)
@@ -1407,7 +1411,7 @@ contract EulerTestBase is MainnetBase {
         vm.assume(isValidCollateralAsset(collateralAssets));
 
         // Setup: create intermediate vault with deposits
-        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAssets]);
         address underlyingAsset = IEVault(collateralAssets).asset();
 
         uint256 depositAmount = 1e18;
@@ -1531,7 +1535,7 @@ contract EulerTestBase is MainnetBase {
         uint256 ethDepositAmount = 1 ether;
         vm.deal(alice, ethDepositAmount);
 
-        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAssets]);
 
         if (underlyingAsset != WETH) {
             // Test that depositETHToIntermediateVault reverts when used with non-WETH underlying

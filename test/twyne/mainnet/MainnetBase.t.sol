@@ -13,7 +13,6 @@ import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {MockPriceOracle} from "euler-vault-kit/../test/mocks/MockPriceOracle.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 
 
@@ -25,8 +24,6 @@ contract MainnetBase is TwyneVaultTestBase {
     error InvalidInvariant();
     error NoConfiguredOracle();
     error InvalidCollateral();
-
-    HealthStatViewer healthViewer;
 
     uint256 WETH_USD_PRICE_INITIAL;
     uint256 constant USDC_USD_PRICE_INITIAL = 1e18 * 1e18 / 1e6;
@@ -78,8 +75,6 @@ contract MainnetBase is TwyneVaultTestBase {
 
         // Create vault manager and configure
         vm.startPrank(admin);
-
-        healthViewer = new HealthStatViewer(aavePool);
 
         vm.stopPrank();
         vm.label(eulerSwapper, "eulerSwapper");

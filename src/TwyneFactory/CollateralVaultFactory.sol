@@ -35,8 +35,9 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
     VaultManager public vaultManager;
     mapping(address borrower => uint nonce) public nonce;
     mapping(address targetVault => mapping(address collateralAsset => mapping( address targetAsset => uint8 categoryId))) public categoryId;
+    address public pauseGuardian;
 
-    uint[49] private __gap;
+    uint[48] private __gap;
 
     constructor(address _evc) EVCUtil(_evc) {
         _disableInitializers();
@@ -55,7 +56,7 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
 
     /// @dev increment the version for proxy upgrades
     function version() external pure returns (uint) {
-        return 2;
+        return 3;
     }
 
     function getCollateralVaults(address borrower) external view returns (address[] memory) {
@@ -86,10 +87,24 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
         emit T_CategoryIdSet(_targetVault, _collateralAsset, _targetAsset, _categoryId);
     }
 
+    /// @notice Set a dedicated pause guardian that can only trigger emergency pauses.
+    function setPauseGuardian(address _pauseGuardian) external onlyOwner {
+        pauseGuardian = _pauseGuardian;
+        emit T_SetPauseGuardian(_pauseGuardian);
+    }
+
     /// @dev pause deposit and borrowing via collateral vault
-    function pause(bool p) external onlyOwner {
-        p ? _pause() : _unpause();
-        emit T_FactoryPause(p);
+    function pause() external {
+        address sender = _msgSender();
+        require(sender == owner() || sender == pauseGuardian, CallerNotOwnerOrPauseGuardian());
+        _pause();
+        emit T_FactoryPause(true);
+    }
+
+    /// @dev unpause deposit and borrowing via collateral vault
+    function unpause() external onlyOwner {
+        _unpause();
+        emit T_FactoryPause(false);
     }
 
     function _msgSender() internal view override(ContextUpgradeable, EVCUtil) returns (address) {
@@ -98,24 +113,24 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
 
     /// @notice This function is called when a borrower wants to deploy a new collateral vault.
     /// @param _vaultType type of vault, only EULER_V2 or AAVE_V3 allowed
-    /// @param _asset address of vault asset
+    /// @param _intermediateVault address of the intermediate vault
     /// @param _targetVault address of the target vault, used for the lookup of the beacon proxy implementation contract
     /// @param _liqLTV user-specified target LTV
     /// @param _targetAsset debt token to be borrowed
     /// @return vault address of the newly created collateral vault
-    function createCollateralVault(VaultType _vaultType, address _asset, address _targetVault, uint _liqLTV, address _targetAsset)
+    function createCollateralVault(VaultType _vaultType, address _intermediateVault, address _targetVault, uint _liqLTV, address _targetAsset)
         external
         callThroughEVC
         whenNotPaused
         returns (address vault)
     {
         // First validate the input params
-        address intermediateVault = vaultManager.getIntermediateVault(_asset);
+        require(vaultManager.isIntermediateVault(_intermediateVault), IntermediateVaultNotSet());
+        address _asset = IEVault(_intermediateVault).asset();
         if (_vaultType == VaultType.EULER_V2) {
-            // collateral is allowed because the above line will revert if collateral is not recognized
-            require(vaultManager.isAllowedTargetVault(intermediateVault, _targetVault), NotIntermediateVault());
+            require(vaultManager.isAllowedTargetVault(_intermediateVault, _targetVault), NotIntermediateVault());
         } else if (_vaultType == VaultType.AAVE_V3) {
-            require(vaultManager.isAllowedTargetAssets(intermediateVault, _targetVault, _targetAsset), NotIntermediateVault());
+            require(vaultManager.isAllowedTargetAssets(_intermediateVault, _targetVault, _targetAsset), NotIntermediateVault());
         }
         address msgSender = _msgSender();
         vault = address(new BeaconProxy{salt: keccak256(abi.encodePacked(msgSender, nonce[msgSender]++))}(collateralVaultBeacon[_targetVault], ""));
@@ -123,15 +138,15 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
 
         collateralVaults[msgSender].push(vault);
         if (_vaultType == VaultType.EULER_V2) {
-            EulerCollateralVault(vault).initialize(IERC20(_asset), msgSender, _liqLTV, vaultManager);
+            EulerCollateralVault(vault).initialize(_intermediateVault, msgSender, _liqLTV, vaultManager);
             vaultManager.setOracleResolvedVault(vault, true);
         } else {
-            AaveV3CollateralVault(vault).initialize(IERC20(_asset), msgSender, _liqLTV, vaultManager, _targetAsset, categoryId[_targetVault][_asset][_targetAsset]);
-            vaultManager.setOracleResolvedVaultForOracleRouter(IEVault(intermediateVault).oracle(), vault, true);
+            AaveV3CollateralVault(vault).initialize(_intermediateVault, msgSender, _liqLTV, vaultManager, _targetAsset, categoryId[_targetVault][_asset][_targetAsset]);
+            vaultManager.setOracleResolvedVaultForOracleRouter(IEVault(_intermediateVault).oracle(), vault, true);
         }
         // Having hardcoded _liquidationLimit here is fine since vault's liquidation by intermediateVault is disabled
         // during normal operation. It's allowed only when vault is externally liquidated and that too it's to settle bad debt.
-        vaultManager.setLTV(IEVault(intermediateVault), vault, 1e4, 1e4, 0);
+        vaultManager.setLTV(IEVault(_intermediateVault), vault, 1e4, 1e4, 0);
 
         emit T_CollateralVaultCreated(vault);
     }

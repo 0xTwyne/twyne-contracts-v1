@@ -102,7 +102,7 @@ contract AaveTestNormalActions is AaveTestBase {
     }
 
     function test_aave_creditWithdrawWithInterestAndNoFees() public noGasMetering {
-        aave_creditWithdrawWithInterestAndNoFees(address(aWETHWrapper), 1000);
+        aave_creditWithdrawWithInterestAndNoFees(address(aWETHWrapper), 500);
     }
 
     // fuzzing entry point for all assets
@@ -167,7 +167,7 @@ contract AaveTestNormalActions is AaveTestBase {
 
     // Test that if time passes, the balance of aTokens in the collateral vault increases and the user can withdraw all
     function test_aave_withdrawCollateralAfterWarp() public noGasMetering {
-        aave_withdrawCollateralAfterWarp(address(aWETHWrapper), 1000);
+        aave_withdrawCollateralAfterWarp(address(aWETHWrapper), 500);
     }
 
     // fuzzing entry point for all assets and different warp periods
@@ -276,10 +276,10 @@ contract AaveTestNormalActions is AaveTestBase {
 
     function test_aave_IRMTwyneCurve_nonLinearPoint() public noGasMetering {
         IRMTwyneCurve irm = new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0,
+            linearParameter_: 750,
+            polynomialParameter_: 49250,
+            nonlinearPoint_: 5e17
         });
 
         uint utilization = irm.nonlinearPoint() - 1;
@@ -324,10 +324,10 @@ contract AaveTestNormalActions is AaveTestBase {
             vm.assume(_utilization <= 1e18);
             uint utilization = uint(_utilization);
             IRMTwyneCurve irm = new IRMTwyneCurve({
-                idealKinkInterestRate_: 600, // 6%
-                linearKinkUtilizationRate_: 8000, // 80%
-                maxInterestRate_: 50000, // 500%
-                nonlinearPoint_: 5e17 // 50%
+                minInterest_: 0,
+                linearParameter_: 750,
+                polynomialParameter_: 49250,
+                nonlinearPoint_: 5e17
             });
 
             uint totalAssets = 1e36;

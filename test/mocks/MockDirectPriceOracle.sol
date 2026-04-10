@@ -52,7 +52,7 @@ contract MockDirectPriceOracle {
         prices[base][quote] = Prices({set: true, bid: newBid, ask: newAsk});
     }
 
-    function calculateQuote(address base, uint256 amount, uint256 p) internal view returns (uint256) {
+    function calculateQuote(address /*base*/, uint256 amount, uint256 p) internal pure returns (uint256) {
         // While base is a vault (for the purpose of the mock, if it implements asset()), then call
         // convertToAssets() to price its shares. This is similar to how EulerRouter implements
         // "resolved" vaults.
@@ -69,7 +69,7 @@ contract MockDirectPriceOracle {
         return amount * p / 1e18;
     }
 
-    function resolveUnderlying(address asset) internal view returns (address) {
+    function resolveUnderlying(address asset) internal pure returns (address) {
 
         return asset;
     }

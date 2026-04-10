@@ -27,11 +27,12 @@ contract EulerTestNormalActions is EulerTestBase {
         IEVault new_intermediate_vault;
         // 1. Deploy new intermediate vault for the collateral asset
         // if intermediate vault already exists
-        try twyneVaultManager.getIntermediateVault(_collateralAsset) returns (address vault) {
-            new_intermediate_vault = IEVault(vault);
-        // if revert encountered because the vault does not exist, create new intermediate vault
-        } catch {
+        if (intermediateVaultFor[_collateralAsset] != address(0)) {
+            new_intermediate_vault = IEVault(intermediateVaultFor[_collateralAsset]);
+        // if intermediate vault does not exist, create new intermediate vault
+        } else {
             new_intermediate_vault = newIntermediateVault(_collateralAsset, address(oracleRouter), USD);
+            intermediateVaultFor[_collateralAsset] = address(new_intermediate_vault);
         }
 
         // 4. Set up CrossAdapter for external liquidations
@@ -53,9 +54,9 @@ contract EulerTestNormalActions is EulerTestBase {
         twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_collateralAsset).asset(), USD, address(eulerExternalOracle))));
         // twyneVaultManager.setIntermediateVault(IEVault(new_intermediate_vault)); // already done in newIntermediateVault()
 
-        // 2. Configure twyneVaultManager for the new pair
-        twyneVaultManager.setMaxLiquidationLTV(_collateralAsset, 0.93e4); // 93%
-        twyneVaultManager.setExternalLiqBuffer(_collateralAsset, 1e4); // 1%
+        // 2. Configure twyneVaultManager for the new pair (params keyed by intermediate vault)
+        twyneVaultManager.setMaxLiquidationLTV(address(new_intermediate_vault), 0.93e4, 0); // 93%
+        twyneVaultManager.setExternalLiqBuffer(address(new_intermediate_vault), 1e4, 0); // 1%
         twyneVaultManager.setAllowedTargetVault(address(new_intermediate_vault), _targetAsset);
 
         // 3. Deploy a new EulerCollateralVault implementation for the target asset and set the beacon
@@ -74,7 +75,7 @@ contract EulerTestNormalActions is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault(
                 VaultType.EULER_V2,
-                _collateralAsset,
+                address(new_intermediate_vault),
                 _targetAsset,
                 twyneLiqLTV,
                 address(0)
@@ -93,7 +94,7 @@ contract EulerTestNormalActions is EulerTestBase {
         require(twyneVaultManager.oracleRouter().getQuote(1e16, IEVault(collateralAsset).asset(), IEVault(collateralAsset).unitOfAccount()) != 0, "bad setup for collateral asset underlying oracle"); // USDC -> WETH
         require(twyneVaultManager.oracleRouter().getQuote(1e16, IEVault(targetAsset).asset(), USD) != 0, "bad setup for target asset accounting oracle"); // WETH -> USD
         require(twyneVaultManager.oracleRouter().getQuote(1e16, IEVault(targetAsset).asset(), IEVault(collateralAsset).asset()) != 0, "bad setup for target asset oracle"); // WETH -> USDC
-        require(twyneVaultManager.getIntermediateVault(collateralAsset) != address(0), "intermediate vault not properly created");
+        require(intermediateVaultFor[collateralAsset] != address(0), "intermediate vault not properly created");
     }
 
     function test_e_deleteAssetPair() public noGasMetering {

@@ -27,7 +27,7 @@ contract EulerOperators is EulerTestBase {
         EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -45,7 +45,7 @@ contract EulerOperators is EulerTestBase {
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -254,7 +254,7 @@ contract EulerOperators is EulerTestBase {
         EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -272,7 +272,7 @@ contract EulerOperators is EulerTestBase {
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)

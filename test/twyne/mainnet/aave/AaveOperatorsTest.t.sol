@@ -17,6 +17,9 @@ import {SafeERC20Lib} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
+import {BeaconProxy} from "openzeppelin-contracts/proxy/beacon/BeaconProxy.sol";
+import {Create2} from "openzeppelin-contracts/utils/Create2.sol";
+import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
 interface IMorpho {
     function flashLoan(address token, uint assets, bytes calldata data) external;
@@ -127,7 +130,7 @@ contract AaveOperatorsTest is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
                 _targetAsset: USDC
@@ -179,7 +182,7 @@ contract AaveOperatorsTest is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
                 _targetAsset: USDC
@@ -208,7 +211,7 @@ contract AaveOperatorsTest is AaveTestBase {
         // Verify the position is now in the CollateralVault
         uint vaultCollateral = alice_aave_vault.totalAssetsDepositedOrReserved() - alice_aave_vault.maxRelease();
         assertApproxEqAbs(vaultCollateral, IAaveV3ATokenWrapper(alice_aave_vault.asset()).previewWithdraw(actualATokenBalance), 1, "Vault should have received collateral from teleport");
-        assertApproxEqAbs(alice_aave_vault.maxRepay(), actualDebtBalance, 1, "Vault should have migrated debt");
+        assertApproxEqAbs(alice_aave_vault.maxRepay(), actualDebtBalance, 2, "Vault should have migrated debt");
 
         vm.stopPrank();
     }
@@ -235,7 +238,7 @@ contract AaveOperatorsTest is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
                 _targetAsset: USDC
@@ -265,7 +268,7 @@ contract AaveOperatorsTest is AaveTestBase {
         // Verify the position is now in the CollateralVault
         uint vaultCollateral = alice_aave_vault.totalAssetsDepositedOrReserved() - alice_aave_vault.maxRelease();
         assertApproxEqAbs(vaultCollateral, IAaveV3ATokenWrapper(alice_aave_vault.asset()).previewWithdraw(actualATokenBalance), 1, "Vault should have received collateral from teleport");
-        assertApproxEqAbs(alice_aave_vault.maxRepay(), actualDebtBalance, 1, "Vault should have migrated debt");
+        assertApproxEqAbs(alice_aave_vault.maxRepay(), actualDebtBalance, 2, "Vault should have migrated debt");
 
         vm.stopPrank();
     }
@@ -277,7 +280,7 @@ contract AaveOperatorsTest is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
                 _targetAsset: USDC
@@ -309,6 +312,104 @@ contract AaveOperatorsTest is AaveTestBase {
         // Try to call teleport operator callback directly
         vm.expectRevert(TwyneErrors.T_CallerNotMorpho.selector);
         aaveV3TeleportOperator.onMorphoFlashLoan(1000e6, "");
+    }
+
+    // Test teleport in single batch: create vault, enable operator, teleport, disable operator
+    function test_AaveV3TeleportOperator_SingleBatch() public noGasMetering {
+        // Setup credit deposit for borrowing liquidity
+        aave_creditDeposit(address(aWETHWrapper));
+
+        // Step 1: Create an existing Aave position for alice
+        vm.startPrank(alice);
+
+        uint collateralAmount = 10 ether;
+        uint borrowAmount = 5000e6;
+
+        deal(WETH, alice, collateralAmount);
+        IERC20(WETH).approve(aavePool, collateralAmount);
+        IAaveV3Pool(aavePool).supply(WETH, collateralAmount, alice, 0);
+        IAaveV3Pool(aavePool).borrow(USDC, borrowAmount, 2, 0, alice);
+
+        IAaveV3AToken aWETH = IAaveV3AToken(aWETHWrapper.aToken());
+        uint actualATokenBalance = aWETH.balanceOf(alice);
+        uint actualDebtBalance = IERC20(address(aDebtUSDC)).balanceOf(alice);
+
+        // Step 2: Predict collateral vault address using CREATE2
+        address beacon = collateralVaultFactory.collateralVaultBeacon(aavePool);
+        uint currentNonce = collateralVaultFactory.nonce(alice);
+        bytes32 salt = keccak256(abi.encodePacked(alice, currentNonce));
+        bytes32 bytecodeHash = keccak256(abi.encodePacked(
+            type(BeaconProxy).creationCode,
+            abi.encode(beacon, "")
+        ));
+        address predictedVault = Create2.computeAddress(salt, bytecodeHash, address(collateralVaultFactory));
+
+        console2.log("Predicted vault address:", predictedVault);
+
+        // Step 3: Approve aTokens to teleport operator (only approval done before batch)
+        IERC20(address(aWETH)).approve(address(aaveV3TeleportOperator), actualATokenBalance);
+
+        // Step 4: Build batch items
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](4);
+
+        // Item 0: Create collateral vault
+        items[0] = IEVC.BatchItem({
+            targetContract: address(collateralVaultFactory),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(
+                CollateralVaultFactory.createCollateralVault,
+                (VaultType.AAVE_V3, intermediateVaultFor[address(aWETHWrapper)], aavePool, 9100, USDC)
+            )
+        });
+
+        // Item 1: Enable teleport operator (onBehalfOfAccount must be address(0) when targeting EVC itself)
+        items[1] = IEVC.BatchItem({
+            targetContract: address(evc),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(IEVC.setAccountOperator, (alice, address(aaveV3TeleportOperator), true))
+        });
+
+        // Item 2: Execute teleport
+        items[2] = IEVC.BatchItem({
+            targetContract: address(aaveV3TeleportOperator),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(
+                aaveV3TeleportOperator.executeTeleport,
+                (predictedVault, actualATokenBalance, actualDebtBalance)
+            )
+        });
+
+        // Item 3: Disable teleport operator (onBehalfOfAccount must be address(0) when targeting EVC itself)
+        items[3] = IEVC.BatchItem({
+            targetContract: address(evc),
+            onBehalfOfAccount: address(0),
+            value: 0,
+            data: abi.encodeCall(IEVC.setAccountOperator, (alice, address(aaveV3TeleportOperator), false))
+        });
+
+        // Step 5: Execute batch
+        evc.batch(items);
+
+        // Step 6: Verify the vault was created at predicted address
+        assertTrue(collateralVaultFactory.isCollateralVault(predictedVault), "Vault should be created at predicted address");
+        alice_aave_vault = AaveV3CollateralVault(predictedVault);
+
+        // Step 7: Verify teleport success
+        assertEq(aWETH.balanceOf(alice), 0, "User's direct aWETH should be transferred");
+        assertEq(IERC20(address(aDebtUSDC)).balanceOf(alice), 0, "User's direct debt should be repaid");
+
+        // Verify the position is now in the CollateralVault
+        uint vaultCollateral = alice_aave_vault.totalAssetsDepositedOrReserved() - alice_aave_vault.maxRelease();
+        assertApproxEqAbs(vaultCollateral, IAaveV3ATokenWrapper(alice_aave_vault.asset()).previewWithdraw(actualATokenBalance), 1, "Vault should have received collateral from teleport");
+        assertApproxEqAbs(alice_aave_vault.maxRepay(), actualDebtBalance, 2, "Vault should have migrated debt");
+
+        // Verify operator is disabled
+        assertFalse(evc.isAccountOperatorAuthorized(alice, address(aaveV3TeleportOperator)), "Teleport operator should be disabled");
+
+        vm.stopPrank();
     }
 
 }

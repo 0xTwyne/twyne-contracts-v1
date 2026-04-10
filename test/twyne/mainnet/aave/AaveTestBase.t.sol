@@ -71,9 +71,11 @@ contract AaveTestBase is MainnetBase {
     AaveV3DeleverageOperator aaveV3DeleverageOperator;
     AaveV3TeleportOperator aaveV3TeleportOperator;
 
+    mapping(address => address) intermediateVaultFor;
+
     function setUp() public virtual override {
 
-        forkBlock = 23600528;
+        forkBlock = 24267069;
         forkBlockDiff = block.number - forkBlock;
 
         vm.rollFork(forkBlock);
@@ -95,8 +97,6 @@ contract AaveTestBase is MainnetBase {
         vm.startPrank(admin);
 
         address collateralAsset = address(aWETHWrapper);
-        twyneVaultManager.setMaxLiquidationLTV(collateralAsset, maxLTVInitial);
-        twyneVaultManager.setExternalLiqBuffer(collateralAsset, externalLiqBufferInitial);
         // First, create the intermediate vault for each collateral asset
         bytes memory oracleSetData = abi.encodeCall(EulerRouter.govSetFallbackOracle, (address(aTokenWrapperOracle)));
 
@@ -105,19 +105,25 @@ contract AaveTestBase is MainnetBase {
         aaveEthVault = newIntermediateVaultForAave(collateralAsset, address(aaveOracleRouter), USD);
         string memory intermediate_vault_label = string.concat(IEVault(collateralAsset).symbol(), " intermediate vault");
         vm.label(address(aaveEthVault), intermediate_vault_label);
+        twyneVaultManager.setMaxLiquidationLTV(address(aaveEthVault), maxLTVInitial, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), externalLiqBufferInitial, 0);
 
         twyneVaultManager.setAllowedTargetAsset(address(aaveEthVault), aavePool, USDC);
 
+        intermediateVaultFor[collateralAsset] = address(aaveEthVault);
+
         collateralAsset = address(aWSTETHWrapper);
-        twyneVaultManager.setMaxLiquidationLTV(collateralAsset, 9800);
-        twyneVaultManager.setExternalLiqBuffer(collateralAsset, externalLiqBufferInitial);
         // First, create the intermediate vault for each collateral asset
         IEVault stEthVault = newIntermediateVaultForAave(collateralAsset, address(aaveOracleRouter), USD);
         intermediate_vault_label = string.concat(IEVault(collateralAsset).symbol(), " intermediate vault");
         vm.label(address(stEthVault), intermediate_vault_label);
+        twyneVaultManager.setMaxLiquidationLTV(address(stEthVault), 9800, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(stEthVault), externalLiqBufferInitial, 0);
 
         twyneVaultManager.setAllowedTargetAsset(address(stEthVault), aavePool, USDC);
         twyneVaultManager.setAllowedTargetAsset(address(stEthVault), aavePool, WETH);
+
+        intermediateVaultFor[collateralAsset] = address(stEthVault);
         collateralVaultFactory.setCategoryId(aavePool, collateralAsset, WETH, 1);
         rewardsController = new MockRewardsController(WETH);
         address aWETHWrapperCollateralVaultImpl = address(new AaveV3CollateralVault(address(evc), aavePool, address(rewardsController)));
@@ -188,7 +194,8 @@ contract AaveTestBase is MainnetBase {
     // helper function to mimic frontend functionality in determining how much asset to reserve from the intermediate vault
     function getReservedAssetsForAave(uint256 depositAmountWETH, AaveV3CollateralVault collateralVault) internal view returns (uint reservedAssets) {
         address collateralAsset = collateralVault.asset();
-        uint externalLiqBuffer =  uint(collateralVault.twyneVaultManager().externalLiqBuffers(collateralAsset));
+        address intermediateVault = address(collateralVault.intermediateVault());
+        uint externalLiqBuffer = uint(collateralVault.twyneVaultManager().externalLiqBuffers(intermediateVault));
         uint liqLTV_twyne = collateralVault.twyneLiqLTV();
 
         uint liqLTV_external = getLiqLTV(collateralAsset) * externalLiqBuffer; // 1e8
@@ -219,12 +226,11 @@ contract AaveTestBase is MainnetBase {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
-        // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0,
+            linearParameter_: 750,
+            polynomialParameter_: 49250,
+            nonlinearPoint_: 5e17
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
@@ -241,7 +247,7 @@ contract AaveTestBase is MainnetBase {
         require(aaveExternalOracle != address(0), "aave doesn't support this asset oracle");
 
         twyneVaultManager.doCall(_oracle, 0, abi.encodeCall(EulerRouter.govSetConfig, (_asset, USD, address(aTokenWrapperOracle))));
-        twyneVaultManager.setIntermediateVault(new_vault);
+        twyneVaultManager.setIntermediateVault(new_vault, true);
         new_vault.setGovernorAdmin(address(twyneVaultManager));
 
         assertEq(new_vault.configFlags() & CFG_DONT_SOCIALIZE_DEBT, 0, "debt isn't socialized");
@@ -323,7 +329,7 @@ contract AaveTestBase is MainnetBase {
         bob_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: liqLTV,
                 _targetAsset: USDC
@@ -440,7 +446,7 @@ contract AaveTestBase is MainnetBase {
     function aave_creditDeposit(address collateralAssets) public noGasMetering {
         // This function assumes collateralAssets is address(aWETHWrapper)
         vm.assume(isValidCollateralAsset(collateralAssets));
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         // Bob deposits WETH into aWETHWrapper, then aWETHWrapper tokens into the intermediate_vault
         vm.startPrank(bob);
@@ -468,9 +474,10 @@ contract AaveTestBase is MainnetBase {
     function aave_createCollateralVault(address collateralAssets, uint16 liqLTV, address debtAsset) public noGasMetering {
         vm.assume(isValidCollateralAsset(collateralAssets));
         uint16 minLTV = uint16(getLiqLTV(collateralAssets, debtAsset));
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(collateralAssets);
+        address intermediateVault = intermediateVaultFor[collateralAssets];
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(collateralAssets));
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault));
 
         aave_creditDeposit(collateralAssets);
 
@@ -479,7 +486,7 @@ contract AaveTestBase is MainnetBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: liqLTV,
                 _targetAsset: debtAsset
@@ -494,7 +501,7 @@ contract AaveTestBase is MainnetBase {
         // Sets up credit deposit and creates the vault
         aave_createCollateralVault(collateralAssets, liqLTV);
 
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         uint256 wrappedBalance = IAaveV3ATokenWrapper(collateralAssets).balanceOf(address(intermediate_vault));
         // eve donates aWETHWrapper tokens to the intermediate vault, ensure this doesn't increase its totalAssets
@@ -611,7 +618,7 @@ contract AaveTestBase is MainnetBase {
         uint256 oneEther = 10 ** uint256(IERC20(collateralAssets).decimals());
 
         // Some shared logic with test_e_maxBorrowFromEulerDirect()
-        alice_aave_vault.setTwyneLiqLTV(liqLTV * uint(twyneVaultManager.externalLiqBuffers(alice_aave_vault.asset())) / MAXFACTOR);
+        alice_aave_vault.setTwyneLiqLTV(liqLTV * uint(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault()))) / MAXFACTOR);
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         // reserve assets from intermediate vault
@@ -645,7 +652,7 @@ contract AaveTestBase is MainnetBase {
 
     function aave_second_creditDeposit(address collateralAssets) public noGasMetering {
         aave_creditDeposit(collateralAssets);
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
         // Bob deposits more into the intermediate_vault
         vm.startPrank(bob);
         intermediate_vault.deposit(CREDIT_LP_AMOUNT, bob);
@@ -658,7 +665,7 @@ contract AaveTestBase is MainnetBase {
 
     function aave_creditWithdrawNoInterest(address collateralAssets) public {
         aave_creditDeposit(collateralAssets);
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         assertEq(intermediate_vault.totalAssets(), CREDIT_LP_AMOUNT, "totalAssets isn't the expected value");
         assertEq(intermediate_vault.balanceOf(bob), CREDIT_LP_AMOUNT, "bob has wrong balance");
@@ -674,7 +681,7 @@ contract AaveTestBase is MainnetBase {
 
     function aave_supplyCap_creditDeposit(address collateralAssets) public {
         vm.assume(isValidCollateralAsset(collateralAssets));
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         vm.startPrank(address(intermediate_vault.governorAdmin()));
         uint16 supplyCap = 32000 + IERC20(IEVault(collateralAssets).asset()).decimals();
@@ -697,7 +704,7 @@ contract AaveTestBase is MainnetBase {
         vm.assume(warpBlockAmount < forkBlockDiff);
         aave_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         // Confirm fees setup
         assertEq(intermediate_vault.interestFee(), 0, "Unexpected intermediate vault interest fee");
@@ -738,7 +745,7 @@ contract AaveTestBase is MainnetBase {
 
         aave_collateralDepositWithoutBorrow(collateralAssets, 0.9e4);
 
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[collateralAssets]);
 
         // Set non-zero protocolConfig fee
         vm.startPrank(admin);
@@ -839,7 +846,7 @@ contract AaveTestBase is MainnetBase {
         AaveV3CollateralVault user_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: wrappedCollateral,
+                _intermediateVault: intermediateVaultFor[wrappedCollateral],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC
@@ -915,7 +922,7 @@ contract AaveTestBase is MainnetBase {
         AaveV3CollateralVault user_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC
@@ -983,7 +990,7 @@ contract AaveTestBase is MainnetBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, collateralAssets, aavePool, twyneLiqLTV, USDC))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, intermediateVaultFor[collateralAssets], aavePool, twyneLiqLTV, USDC))
         });
 
         // 1. Simulate the batch to get the expected vault address
@@ -1270,7 +1277,7 @@ contract AaveTestBase is MainnetBase {
         bob_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: collateralAssets,
+                _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC
@@ -1300,7 +1307,7 @@ contract AaveTestBase is MainnetBase {
 
         vm.startPrank(alice);
         // Toggle LTV before any borrows exist
-        uint16 newLTV = twyneVaultManager.maxTwyneLTVs(alice_aave_vault.asset()) - 100;
+        uint16 newLTV = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault())) - 100;
         alice_aave_vault.setTwyneLiqLTV(newLTV);
 
         // Assert the change took place
@@ -1322,7 +1329,7 @@ contract AaveTestBase is MainnetBase {
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         alice_aave_vault.setTwyneLiqLTV(1e4);
 
-        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(alice_aave_vault.asset());
+        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()));
         alice_aave_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 50);
         alice_aave_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 100);
         alice_aave_vault.setTwyneLiqLTV(cachedMaxTwyneLTV);
@@ -1336,7 +1343,7 @@ contract AaveTestBase is MainnetBase {
         vm.assume(isValidCollateralAsset(collateralAssets));
 
         // Setup: create intermediate vault with deposits (done in setup)
-        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAssets]);
         address underlyingAsset = IAaveV3ATokenWrapper(collateralAssets).asset(); // WETH
 
         uint256 depositAmount = 1e18; // 1 WETH
@@ -1515,7 +1522,7 @@ contract AaveTestBase is MainnetBase {
 
         vm.startPrank(admin);
         // Set an External Liq Buffer (Twyne's safety margin)
-        twyneVaultManager.setExternalLiqBuffer(collateralAssets, 0.95e4); // 96%
+        twyneVaultManager.setExternalLiqBuffer(address(alice_aave_vault.intermediateVault()), 0.95e4, 0); // 96%
         vm.stopPrank();
         uint snapshot = vm.snapshotState();
 
@@ -1532,9 +1539,12 @@ contract AaveTestBase is MainnetBase {
             data: abi.encodeCall(alice_aave_vault.deposit, COLLATERAL_AMOUNT)
         });
         evc.batch(items);
-
-
-
+        vm.stopPrank();
+        address underlyingAsset = IAaveV3ATokenWrapper(collateralAssets).asset();
+        vm.startPrank(address(alice_aave_vault));
+        IAaveV3Pool(aavePool).setUserUseReserveAsCollateral(underlyingAsset, true);
+        vm.stopPrank();
+        vm.startPrank(alice);
         // --- MAX BORROW CALCULATION for Twyne's Liq Buffer (first condition) ---
 
         // Get max borrowable amount based on Aave's Health Factor / Liquidation Threshold
@@ -1560,7 +1570,7 @@ contract AaveTestBase is MainnetBase {
 
         vm.startPrank(admin);
         // Reset External Liq Buffer (to ensure the *Aave Health Factor* check triggers next)
-        twyneVaultManager.setExternalLiqBuffer(collateralAssets, uint16(MAXFACTOR)); // 100% buffer
+        twyneVaultManager.setExternalLiqBuffer(address(alice_aave_vault.intermediateVault()), uint16(MAXFACTOR), 0); // 100% buffer
         vm.stopPrank();
 
         vm.startPrank(alice);
@@ -1576,8 +1586,11 @@ contract AaveTestBase is MainnetBase {
             data: abi.encodeCall(alice_aave_vault.deposit, COLLATERAL_AMOUNT)
         });
         evc.batch(items);
-
-
+        vm.stopPrank();
+        vm.startPrank(address(alice_aave_vault));
+        IAaveV3Pool(aavePool).setUserUseReserveAsCollateral(underlyingAsset, true);
+        vm.stopPrank();
+        vm.startPrank(alice);
         // Get max borrowable amount from Aave (will be higher now due to 100% buffer)
         (totalCollateralBase,,availableBorrowsBase,,,) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
         // divide by 2 as on aave base is 1 usd and 1 usd is represented as 1e8
@@ -1676,7 +1689,7 @@ contract AaveTestBase is MainnetBase {
         uint256 ethDepositAmount = 1 ether;
         vm.deal(alice, ethDepositAmount);
 
-        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAssets));
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAssets]);
 
 
         if (underlyingAsset != WETH) {

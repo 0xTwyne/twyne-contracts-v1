@@ -44,7 +44,12 @@ contract TwyneUpgradeTests is Test {
 
         twyneVaultManager = VaultManager(payable(0x5357426530F997E03Fcf8F68bdB4a7ac6ABa5d9f));
         vm.label(address(twyneVaultManager), "twyneVaultManager");
-        intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(eulerWETH));
+        // Use low-level call since getIntermediateVault was removed from VaultManager but the on-chain
+        // contract at this fork block still has it.
+        (bool ok, bytes memory retdata) =
+            address(twyneVaultManager).staticcall(abi.encodeWithSignature("getIntermediateVault(address)", eulerWETH));
+        require(ok, "getIntermediateVault staticcall failed");
+        intermediate_vault = IEVault(abi.decode(retdata, (address)));
         vm.label(address(intermediate_vault), "intermediate_vault");
         collateralVaultFactory = CollateralVaultFactory(0xBe3205Ec9FF7314e9Df89d91ee28C5a22BEb1200);
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
@@ -165,7 +170,9 @@ contract TwyneUpgradeTests is Test {
         // Step 2: Create a collateral vault and teleport the position
         vm.startPrank(user);
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, eulerWETH, eulerUSDC, 0.9e4, address(0))
+            collateralVaultFactory.createCollateralVault(
+                VaultType.EULER_V2, address(intermediate_vault), eulerUSDC, 0.9e4, address(0)
+            )
         );
         vm.stopPrank();
         vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
@@ -238,7 +245,9 @@ contract TwyneUpgradeTests is Test {
 
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, eulerWETH, eulerUSDC, 0.9e4, address(0))
+            collateralVaultFactory.createCollateralVault(
+                VaultType.EULER_V2, address(intermediate_vault), eulerUSDC, 0.9e4, address(0)
+            )
         );
 
         vm.label(address(alice_collateral_vault), "alice_collateral_vault");

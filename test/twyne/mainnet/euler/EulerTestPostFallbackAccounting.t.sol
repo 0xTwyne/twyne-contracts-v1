@@ -203,7 +203,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         uint256 C_old = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
         uint256 C_LP_old = alice_collateral_vault.maxRelease();
         uint256 B_left = alice_collateral_vault.maxRepay();
-        uint256 twyne_maxLTV = twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset());
+        uint256 twyne_maxLTV = twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()));
 
         console2.log("C_old", C_old);
         console2.log("C_LP_old", C_LP_old);
@@ -2054,9 +2054,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     function createInitialPosition(uint256 C, uint256, /* CLP */ uint256 B, uint256 twyneLTV) public {
         //Pre-setup
         uint16 minLTV = IEVault(eulerUSDC).LTVLiquidation(eulerWETH);
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(eulerWETH);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault));
         require(uint256(minLTV) * uint256(extLiqBuffer) <= uint256(twyneLTV) * MAXFACTOR, "precond fail");
-        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(eulerWETH), "twyneLTV too high");
+        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault)), "twyneLTV too high");
 
         // Bob deposits into eeWETH_intermediate_vault to earn boosted yield
         vm.startPrank(bob);
@@ -2068,7 +2068,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLTV, //this is 9000 then 8600
                 _targetAsset: address(0)
@@ -2191,7 +2191,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         (, data.B_left) = IEVault(eulerUSDC).accountLiquidity(address(alice_collateral_vault), true);
         
         // Get max liquidation LTV (in 1e4 precision)
-        data.max_liqLTV_t = twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset());
+        data.max_liqLTV_t = twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()));
         
         // Convert C_left to USD for calculation
         data.C_left_USD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
@@ -2402,12 +2402,12 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // These compute the thresholds so we can assert the state is in the interpolation band.
 
         // β_safe * λ̃_e (same values `_canLiquidate()` uses, but here we convert to bps for direct comparison)
-        uint256 safeThresholdRaw = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset()))
+        uint256 safeThresholdRaw = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
             * IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset());
         uint256 safeThresholdBps = safeThresholdRaw / MAXFACTOR;
 
         // Twyne’s max liquidation LTV; same value the contract enforces when setting the vault’s LTV
-        uint256 maxTwyneLTV = uint256(twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset()));
+        uint256 maxTwyneLTV = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault())));
 
         // --- Final assertion ----------------------------------------------------------
         // Ensure we’re strictly inside the interpolation window:
@@ -2452,9 +2452,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         (uint256 B, uint256 C) = _getBC();
 
         // Calculate interpolation parameters to prove interpolation is working
-        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset()))
+        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
             * uint256(IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset())); // 1e8 precision
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(alice_collateral_vault.asset())); // 1e4 precision
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()))); // 1e4 precision
 
         // Current LTV in same units as liqLTV_e (1e8 precision)
         // The condition in collateralForBorrower is: MAXFACTOR * MAXFACTOR * B <= liqLTV_e * C
@@ -2561,7 +2561,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
             }
         }
 
-        uint256 safeThresholdBps = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset()))
+        uint256 safeThresholdBps = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
             * IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset()) / MAXFACTOR;
 
         assertLe(currentLTV, safeThresholdBps, "LTV should be below safe threshold after repay");

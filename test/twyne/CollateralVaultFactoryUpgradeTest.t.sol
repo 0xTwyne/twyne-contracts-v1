@@ -9,6 +9,7 @@ import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.so
 import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConnector.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
+import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 
 /// @title CollateralVaultFactoryUpgradeTest
 /// @notice Tests for CollateralVaultFactory UUPS upgrade functionality
@@ -125,7 +126,7 @@ contract CollateralVaultFactoryUpgradeTest is Test {
     function test_UpgradePreservesPauseState() public {
         // Pause the factory
         vm.prank(admin);
-        factory.pause(true);
+        factory.pause();
 
         // Verify it's paused
         assertTrue(factory.paused());
@@ -139,6 +140,45 @@ contract CollateralVaultFactoryUpgradeTest is Test {
 
         // Verify pause state is preserved
         assertTrue(factory.paused());
+    }
+
+    function test_SetPauseGuardianAndOwnerCanPauseUnpause() public {
+        address pauseGuardian = makeAddr("pauseGuardian");
+        vm.prank(admin);
+        factory.setPauseGuardian(pauseGuardian);
+        assertEq(factory.pauseGuardian(), pauseGuardian);
+
+        vm.prank(pauseGuardian);
+        factory.pause();
+        assertTrue(factory.paused());
+
+        vm.prank(admin);
+        factory.unpause();
+        assertFalse(factory.paused());
+    }
+
+    function test_PauseRevertsForNonOwnerAndNonGuardian() public {
+        address pauseGuardian = makeAddr("pauseGuardian");
+        vm.prank(admin);
+        factory.setPauseGuardian(pauseGuardian);
+
+        vm.prank(user);
+        vm.expectRevert(TwyneErrors.CallerNotOwnerOrPauseGuardian.selector);
+        factory.pause();
+    }
+
+    function test_UnpauseRevertsForPauseGuardian() public {
+        address pauseGuardian = makeAddr("pauseGuardian");
+        vm.prank(admin);
+        factory.setPauseGuardian(pauseGuardian);
+
+        vm.prank(pauseGuardian);
+        factory.pause();
+        assertTrue(factory.paused());
+
+        vm.prank(pauseGuardian);
+        vm.expectRevert();
+        factory.unpause();
     }
 
     function test_UpgradePreservesBeaconMappings() public {

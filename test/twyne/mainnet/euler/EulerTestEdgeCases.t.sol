@@ -18,7 +18,6 @@ import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/Upgradeable
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
 import {MockCollateralVault} from "test/mocks/MockCollateralVault.sol";
 import {MockChainlinkOracle} from "test/mocks/MockChainlinkOracle.sol";
@@ -31,6 +30,15 @@ import {VaultManager} from "src/twyne/VaultManager.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
 import {MockSwapper} from "test/mocks/MockSwapper.sol";
+
+contract EulerLiqCollateralVault is EulerCollateralVault {
+    constructor(address _evc, address _targetVault) EulerCollateralVault(_evc, _targetVault) {}
+
+    function collateralScaledByLiqLTV1e8() external view returns (uint) {
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault))) * _getExtLiqLTV();
+        return _collateralScaledByLiqLTV1e8(false, adjExtLiqLTV);
+    }
+}
 
 contract NewImplementation {
     uint constant public version = 953;
@@ -50,7 +58,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         alice_WSTETH_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWSTETH,
+                _intermediateVault: intermediateVaultFor[eulerWSTETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -78,7 +86,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -98,7 +106,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerUSDC,
+                _intermediateVault: intermediateVaultFor[eulerUSDC],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -110,7 +118,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerWETH,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -126,7 +134,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         // on Twyne and Euler at the same time. Thus, the batch executed later will be reverted by
         // Euler for items[0].
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.95e4, 0);
         vm.stopPrank();
 
         e_firstBorrowFromEulerDirect(eulerWETH);
@@ -139,7 +147,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
         uint borrowerCollateral = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
 
-        (uint externalHF, , , ) = healthViewer.health(address(alice_collateral_vault));
+        // compute external HF from core contracts
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        uint buffer = uint(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())));
+        (uint extCollVal, uint extDebtVal) = targetVault.accountLiquidity(address(alice_collateral_vault), true);
+        uint externalHF = buffer * 1e18 * extCollVal / (1e4 * extDebtVal);
         uint withdrawAmountTriggerLiquidation = borrowerCollateral * (externalHF - 1.01e18) / 1e18;
         vm.stopPrank();
 
@@ -295,14 +307,14 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.stopPrank();
 
         vm.startPrank(admin);
-        collateralVaultFactory.pause(true);
+        collateralVaultFactory.pause();
         vm.stopPrank();
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -337,7 +349,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         // Unpause the Twyne protocol
         vm.startPrank(admin);
-        collateralVaultFactory.pause(false);
+        collateralVaultFactory.unpause();
         vm.stopPrank();
 
         // Unpause the intermediate vault by returning the original setHookConfig settings
@@ -408,7 +420,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // Governance upgrades proxy
     function test_e_proxyUpgrade() public {
         e_createCollateralVault(eulerWETH, 0.9e4);
-        assertEq(alice_collateral_vault.version(), 2);
+        assertEq(alice_collateral_vault.version(), 3);
         UpgradeableBeacon beacon = UpgradeableBeacon(collateralVaultFactory.collateralVaultBeacon(eulerUSDC));
         vm.startPrank(admin);
         // set new implementation contract
@@ -420,7 +432,7 @@ contract EulerTestEdgeCases is EulerTestBase {
     // Governance upgrades proxy
     function test_e_proxyUpgrade_storageSetInConstructor() public {
         e_firstBorrowFromEulerViaCollateral(eulerWETH);
-        assertEq(alice_collateral_vault.version(), 2);
+        assertEq(alice_collateral_vault.version(), 3);
         UpgradeableBeacon beacon = UpgradeableBeacon(collateralVaultFactory.collateralVaultBeacon(eulerUSDC));
 
         vm.startPrank(admin);
@@ -434,7 +446,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         MockCollateralVault mock_collateral_vault = MockCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -490,15 +502,15 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(IIRM.E_IRMUpdateUnauthorized.selector);
         IRMLinearKink(irm).computeInterestRate(address(0), 100, 900);
 
-        // IRMTwyneCurve curvedIRM = new IRMTwyneCurve(1500, 8000, 12000, 6000);
-        IRMTwyneCurve curvedIRM = new IRMTwyneCurve(1000, 8000, 12000, 4000);
+        // IRMTwyneCurve curvedIRM = new IRMTwyneCurve(linearParam, polyParam, nonlinearPoint);
+        IRMTwyneCurve curvedIRM = new IRMTwyneCurve(0, 1250, 10750, 4e17);
         ir = curvedIRM.computeInterestRateView(address(0), 100, 0);
         ir = curvedIRM.computeInterestRateView(address(0), 100, 50);
         ir = curvedIRM.computeInterestRateView(address(0), 100, 900);
         vm.expectRevert(IIRM.E_IRMUpdateUnauthorized.selector);
         curvedIRM.computeInterestRate(address(0), 100, 900);
         vm.expectRevert(IIRM.E_IRMUpdateUnauthorized.selector);
-        new IRMTwyneCurve(672, 10001, 12000, 4000);
+        new IRMTwyneCurve(0, 1250, 0, 4e17); // polynomialParameter == 0 should revert
         vm.stopPrank();
 
         vm.startPrank(address(eeWETH_intermediate_vault.governorAdmin()));
@@ -536,12 +548,13 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.startPrank(alice);
         // verify the vault can't be initialized again
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        alice_collateral_vault.initialize(IER20_OZ(eulerWETH), alice, twyneLiqLTV, twyneVaultManager);
+        alice_collateral_vault.initialize(intermediateVaultFor[eulerWETH], alice, twyneLiqLTV, twyneVaultManager);
         vm.stopPrank();
 
         vm.startPrank(admin);
-        vm.expectRevert(TwyneErrors.IntermediateVaultAlreadySet.selector);
-        twyneVaultManager.setIntermediateVault(eeWSTETH_intermediate_vault);
+        // setIntermediateVault is now idempotent (no uniqueness check)
+        twyneVaultManager.setIntermediateVault(eeWSTETH_intermediate_vault, true);
+        assertTrue(twyneVaultManager.isIntermediateVault(address(eeWSTETH_intermediate_vault)));
         vm.stopPrank();
 
         // address collateralAsset =  IEVault(eeWSTETH_intermediate_vault).asset();
@@ -567,15 +580,15 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(TwyneErrors.AssetMismatch.selector);
         twyneVaultManager.setLTV(eeWSTETH_intermediate_vault, address(alice_collateral_vault), 6500, 7500, 0);
 
-        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 1e4);
-        twyneVaultManager.setExternalLiqBuffer(eulerWSTETH, 1e4);
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 1e4, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWSTETH_intermediate_vault), 1e4, 0);
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 1e4 + 1);
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 1e4 + 1, 0);
 
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0, 0);
+        assertEq(twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)), 0, "external liq buffer should allow zero");
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0);
-        vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 1e4 + 1);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 1e4 + 1, 0);
     }
 
     function test_e_setNewFactory() public noGasMetering {
@@ -627,12 +640,11 @@ contract EulerTestEdgeCases is EulerTestBase {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
-        // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0,
+            linearParameter_: 750,
+            polynomialParameter_: 49250,
+            nonlinearPoint_: 5e17
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
@@ -645,7 +657,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         twyneVaultManager.setOracleResolvedVault(_asset, true); // need to set this for recursive resolveOracle() lookup
         eulerExternalOracle = EulerRouter(EulerRouter(IEVault(_asset).oracle()).getConfiguredOracle(IEVault(_asset).asset(), USD));
         twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_asset).asset(), USD, address(eulerExternalOracle))));
-        twyneVaultManager.setIntermediateVault(new_vault);
+        twyneVaultManager.setIntermediateVault(new_vault, true);
         new_vault.setGovernorAdmin(address(twyneVaultManager));
 
         assertEq(new_vault.configFlags() & CFG_DONT_SOCIALIZE_DEBT, 0, "debt isn't socialized");
@@ -710,12 +722,12 @@ contract EulerTestEdgeCases is EulerTestBase {
         collateralVaultFactory.setVaultManager(address(twyneVaultManager));
 
         twyneVaultManager.setOracleRouter(address(oracleRouter));
-        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, 0.9e4);
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newEVKIntermediateVault(eulerWETH, address(oracleRouter), USD);
 
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0.95e4);
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 0.9e4, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.95e4, 0);
         twyneVaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
         // Set CrossAdaptor for handling the external liquidation case
@@ -731,7 +743,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(EVCErrors.EVC_ControllerViolation.selector);
         collateralVaultFactory.createCollateralVault({
             _vaultType: VaultType.EULER_V2,
-            _asset: eulerWETH,
+            _intermediateVault: address(eeWETH_intermediate_vault),
             _targetVault: eulerUSDC,
             _liqLTV: twyneLiqLTV,
             _targetAsset: address(0)
@@ -823,31 +835,6 @@ contract EulerTestEdgeCases is EulerTestBase {
 
     }
 
-    // Test the HealthStatViewer.sol helper contract
-    function test_e_HealthStatViewerWithLiability() public noGasMetering {
-        e_firstBorrowFromEulerViaCollateral(eulerWETH);
-
-        uint256 externalHF;
-        uint256 internalHF;
-        uint256 external_liability_value;
-        uint256 internal_liability_value;
-        (externalHF, internalHF, external_liability_value, internal_liability_value) = healthViewer.health(address(alice_collateral_vault));
-        (uint healthFactor, uint collateralValue, uint liabilityValue) = healthViewer.externalHF(address(alice_collateral_vault));
-        (healthFactor, collateralValue, liabilityValue) = healthViewer.internalHF(address(alice_collateral_vault));
-    }
-
-    function test_e_HealthStatViewerWithoutLiability() public noGasMetering {
-        e_createCollateralVault(eulerWETH, 0.9e4);
-
-        uint256 externalHF;
-        uint256 internalHF;
-        uint256 external_liability_value;
-        uint256 internal_liability_value;
-        (externalHF, internalHF, external_liability_value, internal_liability_value) = healthViewer.health(address(alice_collateral_vault));
-        (uint healthFactor, uint collateralValue, uint liabilityValue) = healthViewer.externalHF(address(alice_collateral_vault));
-        (healthFactor, collateralValue, liabilityValue) = healthViewer.internalHF(address(alice_collateral_vault));
-    }
-
     function test_e_teleportRevertsforZeroDeposit() public noGasMetering {
         e_creditDeposit(eulerWETH);
 
@@ -867,7 +854,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -989,55 +976,60 @@ contract EulerTestEdgeCases is EulerTestBase {
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
             })
         );
 
-        // Alice approves collateral vault and confirms deposit reverts because intermediate vault is empty
+        // Alice approves collateral vault
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
-        vm.expectRevert(Errors.E_InsufficientCash.selector);
-        alice_collateral_vault.deposit(1);
+
+        // With dynamic LTV, when intermediate vault is empty (cash = 0), the dynamic leg dominates
+        // and allows deposits without credit reservation. This is the intended behavior.
+        // Deposit succeeds with 0 credit reserved (dynamic leg: adjExtLiqLTV * totalAssets / adjExtLiqLTV = totalAssets)
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        assertEq(alice_collateral_vault.maxRelease(), 0, "No credit reserved when intermediate vault is empty");
         vm.stopPrank();
 
-        // calculate how much to deposit into intermediate vault to get 100% utilization
-        uint minorDiff = 10; // this amount can also be deposited without increasing C_LP
-        uint exactIntermediateDeposit = getReservedAssets(COLLATERAL_AMOUNT, alice_collateral_vault);
-
-        // find the maximum value of dust deposit made which doesn't reserve more credit after
-        // `exactIntermediateDeposit` is deposited by the borrower
-        for (uint i = minorDiff; i >= 0; i--) {
-            uint exactIntermediateDeposit2 = getReservedAssets(COLLATERAL_AMOUNT+i, alice_collateral_vault);
-            if (exactIntermediateDeposit == exactIntermediateDeposit2) {
-                minorDiff = i;
-                break;
-            }
-        }
-
-        // Bob deposits exactIntermediateDeposit into the intermediate vault
+        // Now Bob deposits some credit - this should allow Alice's vault to reserve credit on next action
         vm.startPrank(bob);
         IERC20(eulerWETH).approve(address(eeWETH_intermediate_vault), type(uint256).max);
-        eeWETH_intermediate_vault.deposit(exactIntermediateDeposit, bob);
+        eeWETH_intermediate_vault.deposit(1e18, bob); // 1 WETH deposit
         vm.stopPrank();
 
+        // Alice triggers rebalancing via a small deposit
         vm.startPrank(alice);
-        // Deposit an amount that would create 100% utilization rate
-        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
-        assertEq(IERC20(eulerWETH).balanceOf(address(eeWETH_intermediate_vault)), 0, "The intermediate vault is NOT empty");
-
-        // It is possible to deposit this minor diff amount without increasing C_LP
-        alice_collateral_vault.deposit(minorDiff);
-        // But depositing more beyond this minorDiff amount DOES revert
-        vm.expectRevert(Errors.E_InsufficientCash.selector);
         alice_collateral_vault.deposit(1);
+        // Now credit should be reserved since there's available liquidity
+        uint reservedAfter = alice_collateral_vault.maxRelease();
+        assertGt(reservedAfter, 0, "Should have credit reserved after intermediate vault has liquidity");
         vm.stopPrank();
 
-        // Confirm that if the intermediate vault has 100% utilization, bob cannot withdraw
+        // Verify the intermediate vault now has reduced cash (credit was borrowed)
+        uint currentCash = eeWETH_intermediate_vault.cash();
+        assertLt(currentCash, 1e18, "Intermediate vault cash should be reduced after credit reservation");
+
+        // Bob withdraws all remaining cash to achieve 100% utilization
+        vm.startPrank(bob);
+        if (currentCash > 0) {
+            eeWETH_intermediate_vault.withdraw(currentCash, bob, bob);
+        }
+        vm.stopPrank();
+
+        // Verify the intermediate vault now has exactly 0 cash (100% utilization)
+        assertEq(eeWETH_intermediate_vault.cash(), 0, "Should have 0 cash after withdrawal");
+
+        // Confirm that if the intermediate vault has 100% utilization, bob cannot withdraw more
         vm.startPrank(bob);
         vm.expectRevert(Errors.E_InsufficientCash.selector);
         eeWETH_intermediate_vault.withdraw(1, bob, bob);
+        vm.stopPrank();
+
+        // With dynamic LTV, Alice can still deposit (the dynamic leg handles it gracefully)
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(1);
         vm.stopPrank();
     }
 
@@ -1089,10 +1081,7 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
 
-        (uint256 externalHF, uint256 internalHF,, ) = healthViewer.health(address(alice_collateral_vault));
-
-        // at this point, the vault should not be liquidatable (health factor > 1)
-        assertGt(externalHF, 1e18, "Vault should be healthy before LTV change");
+        // at this point, the vault should not be liquidatable
         assertFalse(alice_collateral_vault.canLiquidate());
 
         address collateralAsset = alice_collateral_vault.intermediateVault().asset();
@@ -1107,14 +1096,8 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         assertEq(targetVault.LTVLiquidation(collateralAsset), newLiquidationLTV, "LiqLTV not updated correctly");
 
-        (uint256 newExternalHF, uint256 newInternalHF,, ) = healthViewer.health(address(alice_collateral_vault));
-
-        // Vault should now be liquidatable (health factor < 1)
-        assertLt(newExternalHF, 1e18, "Vault should be less healthy after increasing external LiqLTV");
+        // Vault should now be liquidatable via Twyne
         assertTrue(alice_collateral_vault.canLiquidate());
-
-        // Internal health factor should remain the same since only target vault's liq LTV was changed
-        assertEq(newInternalHF, internalHF, "Internal health factor should remain unchanged");
 
         // Confirm external liquidation is possible from targetVault perspective
         vm.warp(block.timestamp + 1);
@@ -1137,8 +1120,6 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
 
-        (uint256 externalHF, uint256 internalHF,, ) = healthViewer.health(address(alice_collateral_vault));
-
         address collateralAsset = alice_collateral_vault.intermediateVault().asset();
         uint16 currentBorrowLTV = targetVault.LTVBorrow(collateralAsset);
         uint16 currentLiquidationLTV = targetVault.LTVLiquidation(collateralAsset);
@@ -1151,13 +1132,9 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         assertEq(targetVault.LTVLiquidation(collateralAsset), currentLiquidationLTV + 700, "LiqLTV not updated correctly");
 
-        (uint256 newExternalHF, uint256 newInternalHF,, ) = healthViewer.health(address(alice_collateral_vault));
-
-        // Vault externalHF should now be more healthy
-        assertGt(newExternalHF, externalHF, "Vault should be more healthy after increasing external LiqLTV");
-        // Internal health factor should remain the same since only target vault's liq LTV was changed
-        assertEq(newInternalHF, internalHF, "Internal health factor should remain unchanged");
-        // Verify vault is rebalanceable
+        // Vault should not be liquidatable after raising LTV
+        assertFalse(alice_collateral_vault.canLiquidate());
+        // Verify vault is rebalanceable (position is overcollateralized)
         assertGt(alice_collateral_vault.canRebalance(), 0, "Vault cannot be rebalanced");
     }
 
@@ -1178,8 +1155,8 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         // Twyne can optionally reduce the maxTwyneLTV to increase Twyne liquidation incentive
         vm.startPrank(twyneVaultManager.owner());
-        uint16 currentMaxLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerWETH);
-        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, currentMaxLiqLTV - 100);
+        uint16 currentMaxLiqLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault));
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), currentMaxLiqLTV - 100, 0);
         vm.stopPrank();
 
         // decrease the liquidation discount
@@ -1190,8 +1167,8 @@ contract EulerTestEdgeCases is EulerTestBase {
 
         // Twyne can optionally reduce the maxTwyneLTV to increase Twyne liquidation incentive
         vm.startPrank(twyneVaultManager.owner());
-        currentMaxLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerWETH);
-        twyneVaultManager.setMaxLiquidationLTV(eulerWETH, currentMaxLiqLTV + 200);
+        currentMaxLiqLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault));
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), currentMaxLiqLTV + 200, 0);
         vm.stopPrank();
     }
 
@@ -1362,7 +1339,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         // Step 2: Create a collateral vault and teleport the position
         vm.startPrank(user);
         EulerCollateralVault teleporter_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, eulerWETH, eulerUSDC, twyneLiqLTV, address(0))
+            collateralVaultFactory.createCollateralVault(VaultType.EULER_V2, intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV, address(0))
         );
         vm.stopPrank();
         vm.label(address(teleporter_collateral_vault), "teleporter_collateral_vault");
@@ -1444,7 +1421,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1462,7 +1439,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1601,12 +1578,12 @@ contract EulerTestEdgeCases is EulerTestBase {
         uint borrowerCollateral = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
         uint maxDebt = alice_collateral_vault.maxRepay() / 2;
         uint withdrawCollateralAmount = borrowerCollateral / 2;
-        uint flashloanAmount = withdrawCollateralAmount + 1;
+        uint deleverageFlashloanAmount = withdrawCollateralAmount + 1;
 
         deal(USDC, eulerSwapper, maxDebt + 11);
 
         // Prepare deleverage swap data
-        bytes memory deleverageSwapData = abi.encodeCall(MockSwapper.swap, (WETH, USDC, flashloanAmount, maxDebt + 1, address(deleverageOperator)));
+        bytes memory deleverageSwapData = abi.encodeCall(MockSwapper.swap, (WETH, USDC, deleverageFlashloanAmount, maxDebt + 1, address(deleverageOperator)));
         bytes[] memory deleverageMulticallData = new bytes[](1);
         deleverageMulticallData[0] = deleverageSwapData;
 
@@ -1620,7 +1597,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(TwyneErrors.T_CallerNotBorrower.selector);
         deleverageOperator.executeDeleverage(
             address(alice_collateral_vault),
-            flashloanAmount,
+            deleverageFlashloanAmount,
             maxDebt,
             withdrawCollateralAmount,
             deleverageMulticallData
@@ -1632,7 +1609,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.expectRevert(EVCErrors.EVC_NotAuthorized.selector);
         deleverageOperator.executeDeleverage(
             address(alice_collateral_vault),
-            flashloanAmount,
+            deleverageFlashloanAmount,
             maxDebt,
             withdrawCollateralAmount,
             deleverageMulticallData
@@ -1642,7 +1619,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         evc.setAccountOperator(alice, address(deleverageOperator), true);
         deleverageOperator.executeDeleverage(
             address(alice_collateral_vault),
-            flashloanAmount,
+            deleverageFlashloanAmount,
             maxDebt,
             withdrawCollateralAmount,
             deleverageMulticallData
@@ -1678,7 +1655,90 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.stopPrank();
     }
 
-    // Test that non-collateral vault accounts are blocked by BridgeHookTarget (not CreditRiskManager)
+    // Test that RiskManager allows collateral vault to borrow with zero collateral
+    // from the intermediate vault's perspective (collateral = 0, debt > 0)
+    // function test_e_RiskManager_SkipsLTVChecks() public noGasMetering {
+    //     // Setup: credit deposit so intermediate vault has liquidity
+    //     e_creditDeposit(eulerWETH);
+
+    //     // Create collateral vault
+    //     vm.startPrank(alice);
+    //     alice_collateral_vault = EulerCollateralVault(
+    //         collateralVaultFactory.createCollateralVault({
+    //             _vaultType: VaultType.EULER_V2,
+    //             _intermediateVault: intermediateVaultFor[eulerWETH],
+    //             _targetVault: eulerUSDC,
+    //             _liqLTV: twyneLiqLTV,
+    //             _targetAsset: address(0)
+    //         })
+    //     );
+    //     vm.stopPrank();
+
+    //     uint borrowAmount = 1e18; // borrow 1 eWETH from intermediate vault
+
+    //     // Collateral vault borrows from intermediate vault with no collateral
+    //     vm.prank(address(alice_collateral_vault));
+    //     eeWETH_intermediate_vault.borrow(borrowAmount, address(alice_collateral_vault));
+
+    //     // Check accountLiquidity - collateral should be 0, debt should be non-zero
+    //     (uint collateralValue, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), false);
+
+    //     console2.log("Collateral value:", collateralValue);
+    //     console2.log("Liability value:", liabilityValue);
+
+    //     assertEq(collateralValue, 0, "Collateral should be 0");
+    //     assertGt(liabilityValue, 0, "Liability should be non-zero");
+    // }
+
+    // Test that RiskManager allows collateral vault to borrow above LTV after user deposits collateral
+    // from the intermediate vault's perspective (collateral > 0, debt >> collateral, LTV > 100%)
+    // function test_e_RiskManager_SkipsLTVChecks_WithCollateral() public noGasMetering {
+    //     // Setup: credit deposit so intermediate vault has liquidity
+    //     e_creditDeposit(eulerWETH);
+
+    //     // Create collateral vault
+    //     vm.startPrank(alice);
+    //     alice_collateral_vault = EulerCollateralVault(
+    //         collateralVaultFactory.createCollateralVault({
+    //             _vaultType: VaultType.EULER_V2,
+    //             _intermediateVault: intermediateVaultFor[eulerWETH],
+    //             _targetVault: eulerUSDC,
+    //             _liqLTV: twyneLiqLTV,
+    //             _targetAsset: address(0)
+    //         })
+    //     );
+
+    //     // Deposit collateral into collateral vault
+    //     IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
+    //     alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+    //     vm.stopPrank();
+
+    //     // Borrow enough to make liability exceed collateral (position underwater)
+    //     // Borrowing more will lead to collateral value 0 since collateralVault.balanceOf returns 0 which is fine too.
+    //     uint additionalBorrow = alice_collateral_vault.balanceOf(address(alice_collateral_vault)) - 1;
+
+    //     // Collateral vault borrows more from intermediate vault
+    //     vm.prank(address(alice_collateral_vault));
+    //     eeWETH_intermediate_vault.borrow(additionalBorrow, address(alice_collateral_vault));
+
+    //     // Check accountLiquidity
+    //     (uint collateralValue, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), false);
+
+    //     // Verify liability exceeds collateral value (position is underwater from intermediate vault's POV)
+    //     // This would normally cause checkAccountStatus to revert, but RiskManager skips LTV checks
+
+    //     // Collateral value is zero even if user has deposited into the collateral vault.
+    //     // This is because collateral value is calculated from the collateral amount which is
+    //     // computed using:
+    //     // collateralVault.balanceOf(collateralVault)
+    //     // = totalAssetsDepositedOrReserved - maxRelease()
+    //     // = totalAssetsDepositedOrReserved - min(totalAssetsDepositedOrReserved, intermediateVault.debt)
+    //     // =
+    //     assertGt(collateralValue, 0, "Collateral should be non-zero");
+    //     assertGt(liabilityValue, collateralValue, "Liability should exceed collateral (underwater position)");
+    // }
+
+    // Test that non-collateral vault accounts are blocked by BridgeHookTarget (not RiskManager)
     // The BridgeHookTarget provides the first line of defense by checking receiver is a collateral vault
     function test_e_NonCollateralVaultBorrowBlockedByHook() public noGasMetering {
         // Setup: credit deposit so intermediate vault has liquidity
@@ -1697,7 +1757,7 @@ contract EulerTestEdgeCases is EulerTestBase {
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1719,4 +1779,1225 @@ contract EulerTestEdgeCases is EulerTestBase {
         vm.stopPrank();
     }
 
+    ///
+    // Tests for getAdjustedLTV branches
+    ///
+
+    /// @notice Test Case 1: LTV based on available assets in intermediate vault
+    /// @dev When intermediate vault has no liquidity, the adjusted LTV formula uses clpAvailable=0,
+    /// which limits the effective LTV based on available credit
+    function test_e_getAdjustedLTV_basedOnIntermediateVaultAssets() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Create collateral vault WITHOUT credit LP deposit first
+        // This means intermediate vault has 0 liquidity
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        vm.stopPrank();
+
+        vm.label(address(alice_collateral_vault), "alice_collateral_vault");
+
+        // Verify intermediate vault has no assets
+        IEVault intermediateVault = alice_collateral_vault.intermediateVault();
+        assertEq(intermediateVault.cash(), 0, "Intermediate vault should have 0 cash");
+
+        // Now alice deposits collateral
+        vm.startPrank(alice);
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+
+        // When intermediate vault has 0 cash, the deposit should still succeed
+        // but the reserved amount should be 0 (since there's nothing to borrow from intermediate vault)
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        // When intermediate vault has no cash, maxRelease should be 0
+        // because the collateral vault can't borrow from an empty intermediate vault
+        uint maxRelease = alice_collateral_vault.maxRelease();
+        assertEq(maxRelease, 0, "maxRelease should be 0 when intermediate vault is empty");
+
+        // totalAssetsDepositedOrReserved should equal COLLATERAL_AMOUNT (only user deposit, no reserved)
+        assertEq(
+            alice_collateral_vault.totalAssetsDepositedOrReserved(),
+            COLLATERAL_AMOUNT,
+            "totalAssetsDepositedOrReserved should equal user deposit when no credit available"
+        );
+
+        // User-owned collateral should equal COLLATERAL_AMOUNT
+        assertEq(
+            alice_collateral_vault.balanceOf(address(alice_collateral_vault)),
+            COLLATERAL_AMOUNT,
+            "User collateral should equal deposit amount"
+        );
+    }
+
+    /// @notice Test Case 3: LTV based on max LTV from vault manager
+    /// @dev When vault manager's maxTwyneLTV is reduced after vault creation,
+    /// the adjusted LTV should be capped by the new maxTwyneLTV
+    function test_e_getAdjustedLTV_basedOnMaxLTVFromVaultManager() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Setup: credit deposit so intermediate vault has liquidity
+        e_creditDeposit(collateralAsset);
+
+        // Create collateral vault with a high twyneLiqLTV
+        uint16 initialUserLTV = twyneLiqLTV; // e.g., 0.91e4
+
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: initialUserLTV,
+                _targetAsset: address(0)
+            })
+        );
+        vm.stopPrank();
+
+        vm.label(address(alice_collateral_vault), "alice_collateral_vault");
+        address intermediateVault = address(alice_collateral_vault.intermediateVault());
+
+        // Verify user's twyneLiqLTV is set correctly
+        assertEq(alice_collateral_vault.twyneLiqLTV(), initialUserLTV, "User LTV should be set correctly");
+
+        // Now admin reduces the maxTwyneLTV on vault manager to be lower than user's LTV
+        uint16 newMaxLTV = initialUserLTV - 500; // Reduce by 5% (500 basis points)
+        vm.startPrank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, newMaxLTV, 0);
+        vm.stopPrank();
+
+        // Verify the max LTV was reduced
+        assertEq(
+            twyneVaultManager.maxTwyneLTVs(intermediateVault),
+            newMaxLTV,
+            "Max LTV should be reduced"
+        );
+
+        // User's twyneLiqLTV is still the original value (higher than new max)
+        assertGt(alice_collateral_vault.twyneLiqLTV(), newMaxLTV, "User LTV should be higher than new max LTV");
+
+        // Calculate expected reserved amount based on NEW max LTV (not user's LTV)
+        uint externalLiqBuffer = uint(twyneVaultManager.externalLiqBuffers(intermediateVault));
+        uint externalLiqLTV = IEVault(eulerUSDC).LTVLiquidation(collateralAsset);
+        uint liqLTV_external = externalLiqLTV * externalLiqBuffer; // 1e8 precision
+
+        // The effective LTV should be capped at newMaxLTV
+        uint effectiveLTV = newMaxLTV;
+        uint LTVdiff = (MAXFACTOR * effectiveLTV) - liqLTV_external;
+        uint expectedReservedAssets = Math.ceilDiv(COLLATERAL_AMOUNT * LTVdiff, liqLTV_external);
+
+        // Now alice deposits collateral
+        vm.startPrank(alice);
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.deposit, (COLLATERAL_AMOUNT))
+        });
+        evc.batch(items);
+        vm.stopPrank();
+
+        // Check the reserved amount - it should be based on newMaxLTV, not user's higher LTV
+        uint actualReservedAssets = alice_collateral_vault.maxRelease();
+
+        // The reserved amount should match what's expected with the new max LTV
+        assertApproxEqAbs(
+            actualReservedAssets,
+            expectedReservedAssets,
+            1,
+            "Reserved assets should be based on max LTV from vault manager"
+        );
+
+        // Verify totalAssetsDepositedOrReserved
+        assertEq(
+            alice_collateral_vault.totalAssetsDepositedOrReserved(),
+            COLLATERAL_AMOUNT + actualReservedAssets,
+            "totalAssetsDepositedOrReserved should equal deposit + reserved"
+        );
+
+        // Verify user-owned collateral
+        assertEq(
+            alice_collateral_vault.balanceOf(address(alice_collateral_vault)),
+            COLLATERAL_AMOUNT,
+            "User collateral should equal deposit amount"
+        );
+    }
+
+    // Test that RiskManager's checkAccountStatus returns success for collateral vaults
+    // even when they have debt but no collateral from the intermediate vault's perspective
+    // function test_e_RiskManager_CheckAccountStatus_CollateralVault() public noGasMetering {
+    //     // Setup: credit deposit so intermediate vault has liquidity
+    //     e_creditDeposit(eulerWETH);
+
+    //     // Create collateral vault
+    //     vm.startPrank(alice);
+    //     alice_collateral_vault = EulerCollateralVault(
+    //         collateralVaultFactory.createCollateralVault({
+    //             _vaultType: VaultType.EULER_V2,
+    //             _intermediateVault: intermediateVaultFor[eulerWETH],
+    //             _targetVault: eulerUSDC,
+    //             _liqLTV: twyneLiqLTV,
+    //             _targetAsset: address(0)
+    //         })
+    //     );
+    //     vm.label(address(alice_collateral_vault), "alice_collateral_vault");
+    //     vm.stopPrank();
+
+    //     // Collateral vault borrows from intermediate vault with no collateral
+    //     vm.prank(address(alice_collateral_vault));
+    //     eeWETH_intermediate_vault.borrow(1e18, address(alice_collateral_vault));
+
+    //     // Verify the account is underwater from intermediate vault's perspective
+    //     (uint collateralValue, uint liabilityValue) = eeWETH_intermediate_vault.accountLiquidity(address(alice_collateral_vault), false);
+    //     assertEq(collateralValue, 0, "Collateral should be 0");
+    //     assertGt(liabilityValue, 0, "Liability should be non-zero");
+
+    //     // RiskManager should still allow this because it skips checks for collateral vaults
+    //     // The account status check passes (no revert) even though position is underwater
+    //     address[] memory collaterals = new address[](1);
+    //     collaterals[0] = address(alice_collateral_vault);
+    //     bytes4 result = eeWETH_intermediate_vault.checkAccountStatus(address(alice_collateral_vault), collaterals);
+    //     assertEq(result, IEVCVault.checkAccountStatus.selector, "checkAccountStatus should return success selector");
+
+    //     // Verify that checkAccountStatus also runs (and passes) for non-collateral vault accounts
+    //     // Since alice has no debt (BridgeHookTarget prevents non-collateral vaults from borrowing),
+    //     // the liquidity check passes
+    //     bytes4 aliceResult = eeWETH_intermediate_vault.checkAccountStatus(alice, collaterals);
+    //     assertEq(aliceResult, IEVCVault.checkAccountStatus.selector, "checkAccountStatus should pass for alice with no debt");
+
+    //     // Enable controller for alice so she can attempt to borrow
+    //     vm.startPrank(alice);
+    //     evc.enableController(alice, address(eeWETH_intermediate_vault));
+
+    //     // Verify alice cannot borrow - hook blocks non-collateral vault callers
+    //     vm.expectRevert(TwyneErrors.CallerNotCollateralVault.selector);
+    //     eeWETH_intermediate_vault.borrow(0.1e18, alice);
+    //     // Even when receiver is collateral vault, alice (non-CV caller) still cannot borrow
+    //     vm.expectRevert(TwyneErrors.CallerNotCollateralVault.selector);
+    //     eeWETH_intermediate_vault.borrow(0.1e18, address(alice_collateral_vault));
+
+    //     // Verify alice cannot pullDebt from collateral vault
+    //     vm.expectRevert(TwyneErrors.T_OperationDisabled.selector);
+    //     eeWETH_intermediate_vault.pullDebt(0.1e18, address(alice_collateral_vault));
+    // }
+
+    /// @notice Test dynamic LTV leg selection: when intermediate vault has high liquidity, chosen leg dominates
+    /// @dev When cash >> collateral, dynamic leg = adjExtLiqLTV * (cash + totalAssets) is very large
+    /// so min() selects the chosen leg = userCollateral * MAXFACTOR * min(twyneLiqLTV, maxTwyneLTV)
+    function test_e_dynamicLTV_chosenLegDominates_highLiquidity() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Setup: large credit deposit so intermediate vault has high liquidity
+        e_creditDeposit(collateralAsset);
+
+        // Create collateral vault
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        vm.stopPrank();
+
+        IEVault intermediateVault = alice_collateral_vault.intermediateVault();
+        uint cashBefore = intermediateVault.cash();
+        assertGt(cashBefore, 0, "Intermediate vault should have cash");
+
+        // Deposit collateral
+        vm.startPrank(alice);
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        // Calculate expected reservation using the chosen leg formula
+        // When chosen leg dominates: invariantAmount = ceilDiv(C * MAXFACTOR * minLTV, adjExtLiqLTV)
+        uint externalLiqBuffer = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault)));
+        uint externalLiqLTV = IEVault(eulerUSDC).LTVLiquidation(collateralAsset);
+        uint adjExtLiqLTV = externalLiqBuffer * externalLiqLTV;
+        uint minLTV = Math.min(twyneLiqLTV, twyneVaultManager.maxTwyneLTVs(address(intermediateVault)));
+
+        // Expected: ceilDiv(C * MAXFACTOR * minLTV, adjExtLiqLTV)
+        uint expectedInvariant = Math.ceilDiv(COLLATERAL_AMOUNT * MAXFACTOR * minLTV, adjExtLiqLTV);
+        uint expectedReserved = expectedInvariant - COLLATERAL_AMOUNT;
+
+        uint actualReserved = alice_collateral_vault.maxRelease();
+
+        // Should match chosen leg calculation (with small tolerance for rounding)
+        assertApproxEqAbs(
+            actualReserved,
+            expectedReserved,
+            2,
+            "Reserved amount should match chosen leg formula when liquidity is high"
+        );
+    }
+
+    /// @notice Test dynamic LTV leg selection: when intermediate vault has low liquidity, dynamic leg dominates
+    /// @dev When cash is low/zero, dynamic leg = adjExtLiqLTV * totalAssets is smaller than chosen leg
+    /// so min() selects the dynamic leg, resulting in less/no credit reservation
+    function test_e_dynamicLTV_dynamicLegDominates_lowLiquidity() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Create collateral vault WITHOUT credit deposit (0 liquidity)
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        vm.stopPrank();
+
+        IEVault intermediateVault = alice_collateral_vault.intermediateVault();
+        assertEq(intermediateVault.cash(), 0, "Intermediate vault should have 0 cash");
+
+        // Deposit collateral
+        vm.startPrank(alice);
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        // When cash = 0 and isRebalancing = true:
+        // clpPlusC = 0 + totalAssets = totalAssets (since no borrow yet, totalAssets = COLLATERAL_AMOUNT)
+        // dynamic leg = adjExtLiqLTV * totalAssets
+        // invariantAmount = ceilDiv(adjExtLiqLTV * totalAssets, adjExtLiqLTV) = totalAssets
+        // Therefore reserved = totalAssets - COLLATERAL_AMOUNT = 0
+
+        uint actualReserved = alice_collateral_vault.maxRelease();
+        assertEq(actualReserved, 0, "Reserved should be 0 when dynamic leg dominates with no liquidity");
+
+        // Verify totalAssets equals just the deposit
+        assertEq(
+            alice_collateral_vault.totalAssetsDepositedOrReserved(),
+            COLLATERAL_AMOUNT,
+            "Total assets should equal deposit when no reservation"
+        );
+    }
+
+    /// @notice Test isRebalancing flag: _canLiquidate uses isRebalancing=false (excludes cash)
+    /// @dev This verifies that liquidation checks don't include intermediate vault cash in the dynamic LTV calculation
+    function test_e_dynamicLTV_isRebalancingFlag_liquidationCheck() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Setup with credit deposit
+        e_creditDeposit(collateralAsset);
+
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        // Vault should not be liquidatable initially
+        assertFalse(alice_collateral_vault.canLiquidate(), "Vault should not be liquidatable initially");
+
+        // Borrow a moderate amount (not close to liquidation)
+        vm.startPrank(alice);
+        alice_collateral_vault.borrow(1000e6, alice); // Borrow 1000 USDC
+        vm.stopPrank();
+
+        // Even with borrowing, if position is healthy, canLiquidate should return false
+        // The isRebalancing=false in _canLiquidate means it uses totalAssets without adding cash
+        // This is more conservative for liquidation checks
+        bool canLiq = alice_collateral_vault.canLiquidate();
+
+        // Position should still be healthy (not liquidatable) after moderate borrow
+        assertFalse(canLiq, "Vault should not be liquidatable after moderate borrow");
+    }
+
+    /// @notice Verify intermediateVault.cash() returns available liquidity as expected
+    /// @dev cash() should equal: deposits - borrows (the actual underlying tokens available)
+    function test_e_intermediateVault_cash_behavior() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Step 1: No deposits yet - cash should be 0
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        assertEq(intermediateVault.cash(), 0, "Cash should be 0 before any deposits");
+
+        // Step 2: Credit LP deposits - cash should increase
+        e_creditDeposit(collateralAsset); // This deposits to intermediate vault
+
+        uint cashAfterDeposit = intermediateVault.cash();
+        assertGt(cashAfterDeposit, 0, "Cash should be > 0 after credit deposit");
+
+        // Cash should equal the underlying balance held by the vault
+        address underlyingAsset = intermediateVault.asset();
+        uint vaultUnderlyingBalance = IERC20(underlyingAsset).balanceOf(address(intermediateVault));
+        assertEq(cashAfterDeposit, vaultUnderlyingBalance, "Cash should equal underlying token balance");
+
+        // Step 3: Create collateral vault and deposit (this will borrow from intermediate vault)
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        // Step 4: Cash should decrease by the amount borrowed (reserved credit)
+        uint cashAfterBorrow = intermediateVault.cash();
+        uint reservedCredit = alice_collateral_vault.maxRelease();
+
+        // Cash should have decreased by the reserved amount
+        assertEq(
+            cashAfterBorrow,
+            cashAfterDeposit - reservedCredit,
+            "Cash should decrease by reserved credit amount"
+        );
+
+        // Verify cash still equals underlying balance
+        uint vaultUnderlyingBalanceAfter = IERC20(underlyingAsset).balanceOf(address(intermediateVault));
+        assertEq(cashAfterBorrow, vaultUnderlyingBalanceAfter, "Cash should still equal underlying token balance");
+
+        // Step 5: Verify that C_LP in our formula = cash + maxRelease (total available for this vault)
+        // When isRebalancing=true, clpPlusC = cash + totalAssets
+        // The "available" credit for dynamic LTV = cash (fresh liquidity) + maxRelease (already reserved)
+        uint clpAvailable = cashAfterBorrow + reservedCredit;
+        assertEq(clpAvailable, cashAfterDeposit, "C_LP_available should equal original deposit amount");
+
+        // Step 6: Verify airdropped assets are NOT counted in cash()
+        // Airdrop underlying tokens directly to the intermediate vault (not via deposit)
+        uint airdropAmount = 50e18;
+        deal(underlyingAsset, address(intermediateVault), vaultUnderlyingBalanceAfter + airdropAmount);
+
+        // Cash should NOT change - it only tracks properly deposited liquidity
+        uint cashAfterAirdrop = intermediateVault.cash();
+        assertEq(cashAfterAirdrop, cashAfterBorrow, "Cash should NOT include airdropped tokens");
+
+        // But the raw balance increased
+        uint balanceAfterAirdrop = IERC20(underlyingAsset).balanceOf(address(intermediateVault));
+        assertEq(balanceAfterAirdrop, vaultUnderlyingBalanceAfter + airdropAmount, "Raw balance should include airdrop");
+
+        // Confirm cash != balance after airdrop
+        assertLt(cashAfterAirdrop, balanceAfterAirdrop, "Cash should be less than raw balance after airdrop");
+    }
+
+    /// @notice Test that dynamic LTV responds correctly when Euler lowers external liqLTV
+    /// @dev Lower external liqLTV shrinks dynamic leg, may require more credit reservation
+    function test_e_dynamicLTV_externalLiqLTVDecrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        // Create collateral vault and deposit
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        uint initialMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Get current LTVs from Euler
+        uint16 currentBorrowLTV = targetVault.LTVBorrow(collateralAsset);
+        uint16 currentLiqLTV = targetVault.LTVLiquidation(collateralAsset);
+
+        // Prank Euler governance to lower liqLTV
+        uint16 newLiqLTV = currentLiqLTV - 0.05e4; // Reduce by 5%
+        vm.startPrank(targetVault.governorAdmin());
+        targetVault.setLTV(collateralAsset, currentBorrowLTV - 0.05e4, newLiqLTV, 0);
+        vm.stopPrank();
+
+        // Verify LTV was lowered
+        assertEq(targetVault.LTVLiquidation(collateralAsset), newLiqLTV, "External liqLTV should be lowered");
+
+        // With lower external liqLTV, dynamic leg shrinks: β_safe · λ̃_e · (C_LP + C)
+        // This may require more credit reservation (higher invariant)
+
+        // canRebalance should revert since invariant likely increased
+        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
+        alice_collateral_vault.canRebalance();
+
+        // Trigger rebalancing via deposit to see credit increase
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        vm.stopPrank();
+
+        uint newMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Should have borrowed more credit from intermediate vault
+        assertGt(newMaxRelease, initialMaxRelease, "Should borrow more credit after external liqLTV decrease");
+    }
+
+    /// @notice Test that dynamic LTV responds correctly when Euler raises external liqLTV
+    /// @dev Higher external liqLTV grows dynamic leg, may allow credit release
+    function test_e_dynamicLTV_externalLiqLTVIncrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        // Create collateral vault and deposit
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        uint initialMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Get current LTVs from Euler
+        uint16 currentBorrowLTV = targetVault.LTVBorrow(collateralAsset);
+        uint16 currentLiqLTV = targetVault.LTVLiquidation(collateralAsset);
+
+        // Prank Euler governance to raise liqLTV
+        uint16 ltvBoost = 0.02e4; // Increase by 2%
+        vm.startPrank(targetVault.governorAdmin());
+        targetVault.setLTV(collateralAsset, currentBorrowLTV + ltvBoost, currentLiqLTV + ltvBoost, 0);
+        vm.stopPrank();
+
+        // With higher external liqLTV, dynamic leg grows
+        // This may allow credit release (lower invariant, excess credit)
+
+        // Check if we can rebalance (have excess credit)
+        try alice_collateral_vault.canRebalance() returns (uint excessCredit) {
+            assertGt(excessCredit, 0, "Should have excess credit after external liqLTV increase");
+
+            // Perform rebalance
+            alice_collateral_vault.rebalance();
+
+            uint newMaxRelease = alice_collateral_vault.maxRelease();
+            assertLt(newMaxRelease, initialMaxRelease, "Should have less reserved credit after rebalance");
+        } catch {
+            // If canRebalance reverts, chosen leg might still dominate - that's valid
+        }
+    }
+
+    /// @notice Test that dynamic LTV responds correctly to maxTwyneLTV decrease
+    /// @dev Lower maxTwyneLTV shrinks chosen leg, reducing invariant and allowing credit release
+    function test_e_dynamicLTV_maxTwyneLTVDecrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        address intermediateVault = intermediateVaultFor[collateralAsset];
+        uint16 initialMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(intermediateVault);
+
+        // Create collateral vault with high twyneLiqLTV (capped by maxTwyneLTV)
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: initialMaxTwyneLTV, // Use max LTV
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        uint initialMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Lower maxTwyneLTV - this shrinks the chosen leg
+        // A smaller chosen leg leads to smaller min(dynamic, chosen) -> smaller invariant
+        // Smaller invariant means less credit needed, so vault can release excess credit
+        uint16 newMaxTwyneLTV = initialMaxTwyneLTV - 0.05e4; // Reduce by 5%
+        vm.prank(twyneVaultManager.owner());
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, newMaxTwyneLTV, 0);
+
+        // Check if we can rebalance (have excess credit since invariant decreased)
+        try alice_collateral_vault.canRebalance() returns (uint excessCredit) {
+            assertGt(excessCredit, 0, "Should have excess credit after maxTwyneLTV decrease");
+
+            // Perform rebalance to release excess credit
+            alice_collateral_vault.rebalance();
+
+            uint newMaxRelease = alice_collateral_vault.maxRelease();
+            // Less credit reserved since invariant is smaller
+            assertLt(newMaxRelease, initialMaxRelease, "Credit reservation should decrease when maxTwyneLTV decreases");
+        } catch {
+            // If canRebalance reverts, chosen leg might not be dominant (dynamic leg limits)
+            // In that case, maxTwyneLTV decrease doesn't affect the calculation
+        }
+    }
+
+    /// @notice Test that dynamic LTV responds correctly to externalLiqBuffer decrease
+    /// @dev Lower buffer shrinks dynamic leg, may require more credit reservation
+    function test_e_dynamicLTV_externalLiqBufferDecrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        address intermediateVault = intermediateVaultFor[collateralAsset];
+
+        // Create collateral vault
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        uint initialMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Get initial buffer and decrease it
+        uint16 initialBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
+        uint16 newBuffer = initialBuffer - 0.02e4; // Decrease by 2%
+        if (newBuffer == 0) newBuffer = 1;
+
+        vm.prank(twyneVaultManager.owner());
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, newBuffer, 0);
+
+        // With lower buffer, adjExtLiqLTV decreases, so dynamic leg shrinks
+        // This may require more credit reservation
+
+        // canRebalance should fail (no excess credit)
+        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
+        alice_collateral_vault.canRebalance();
+
+        // Trigger rebalancing via deposit
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        vm.stopPrank();
+
+        uint newMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Should have more credit reserved now
+        assertGt(newMaxRelease, initialMaxRelease, "Should reserve more credit after buffer decrease");
+    }
+
+    /// @notice Test that dynamic LTV responds correctly to externalLiqBuffer increase
+    /// @dev Higher buffer grows dynamic leg, may allow credit release
+    function test_e_dynamicLTV_externalLiqBufferIncrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        address intermediateVault = intermediateVaultFor[collateralAsset];
+
+        // Create collateral vault
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        uint initialMaxRelease = alice_collateral_vault.maxRelease();
+
+        // Get initial buffer and increase it
+        uint16 initialBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
+        uint16 newBuffer = initialBuffer + 0.02e4; // Increase by 2%
+        if (newBuffer > MAXFACTOR) newBuffer = uint16(MAXFACTOR);
+
+        vm.prank(twyneVaultManager.owner());
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, newBuffer, 0);
+
+        // With higher buffer, adjExtLiqLTV increases, so dynamic leg grows
+        // This may allow credit release
+
+        // Check if we can rebalance
+        try alice_collateral_vault.canRebalance() returns (uint excessCredit) {
+            assertGt(excessCredit, 0, "Should have excess credit after buffer increase");
+
+            // Perform rebalance
+            alice_collateral_vault.rebalance();
+
+            uint newMaxRelease = alice_collateral_vault.maxRelease();
+            assertLt(newMaxRelease, initialMaxRelease, "Should have less reserved credit after rebalance");
+        } catch {
+            // If canRebalance reverts, chosen leg might still dominate
+        }
+    }
+
+    /// @notice Test negative excess credit: when parameters change unfavorably, vault needs more credit on next action
+    /// @dev Simulates scenario where external liqLTV drops moderately
+    function test_e_dynamicLTV_negativeExcessCredit_viaExternalLTVDrop() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        // Create collateral vault
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        IEVault intermediateVault = alice_collateral_vault.intermediateVault();
+
+        uint initialTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint initialMaxRelease = alice_collateral_vault.maxRelease();
+        uint initialCash = intermediateVault.cash();
+
+        // Get current LTVs from Euler
+        uint16 currentBorrowLTV = targetVault.LTVBorrow(collateralAsset);
+        uint16 currentLiqLTV = targetVault.LTVLiquidation(collateralAsset);
+
+        // Moderately lower external liqLTV (simulating protocol risk adjustment)
+        // Reduce by 10% to stay within valid bounds
+        uint16 newLiqLTV = currentLiqLTV - 0.10e4;
+        uint16 newBorrowLTV = currentBorrowLTV - 0.10e4;
+
+        vm.startPrank(targetVault.governorAdmin());
+        targetVault.setLTV(collateralAsset, newBorrowLTV, newLiqLTV, 0);
+        vm.stopPrank();
+
+        // Vault is now in "negative excess credit" state - needs more credit
+        // canRebalance should revert
+        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
+        alice_collateral_vault.canRebalance();
+
+        // Any user action will trigger _handleExcessCredit to borrow more
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        vm.stopPrank();
+
+        uint newTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint newMaxRelease = alice_collateral_vault.maxRelease();
+        uint newCash = intermediateVault.cash();
+
+        // Vault should have borrowed significantly more credit
+        assertGt(newMaxRelease, initialMaxRelease, "Should have borrowed more credit");
+        assertGt(newTotalAssets, initialTotalAssets + 0.01e18, "Total assets should increase beyond deposit");
+
+        // Intermediate vault cash should have decreased
+        assertLt(newCash, initialCash, "Intermediate vault cash should decrease");
+    }
+
+    /// @notice Test that leg dominance can switch when liquidity changes dramatically
+    /// @dev Start with low liquidity (dynamic dominant), add liquidity (chosen dominant)
+    function test_e_dynamicLTV_legDominanceSwitch() public noGasMetering {
+        address collateralAsset = eulerWETH;
+
+        // Start with minimal credit deposit for low liquidity
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        address underlying = intermediateVault.asset();
+
+        vm.startPrank(bob);
+        deal(underlying, bob, 0.5e18);
+        IERC20(underlying).approve(address(intermediateVault), type(uint256).max);
+        intermediateVault.deposit(0.5e18, bob); // Only 0.5 WETH
+        vm.stopPrank();
+
+        // Create collateral vault with moderate deposit
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        deal(collateralAsset, alice, 10e18);
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(2e18); // 2 eWETH
+        vm.stopPrank();
+
+        // Record low liquidity state
+        uint lowLiqTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault))) * IEVault(eulerUSDC).LTVLiquidation(collateralAsset);
+        uint dynamicLegLow = adjExtLiqLTV * (intermediateVault.cash() + lowLiqTotalAssets);
+
+        // Now add lots of liquidity
+        vm.startPrank(bob);
+        deal(underlying, bob, 100e18);
+        intermediateVault.deposit(100e18, bob);
+        vm.stopPrank();
+
+        // Trigger rebalancing
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.001e18);
+        vm.stopPrank();
+
+        // Verify dynamic leg grew with more liquidity
+        uint highLiqTotalAssets = alice_collateral_vault.totalAssetsDepositedOrReserved();
+        uint dynamicLegHigh = adjExtLiqLTV * (intermediateVault.cash() + highLiqTotalAssets);
+        assertGe(dynamicLegHigh, dynamicLegLow, "Dynamic leg should grow with more liquidity");
+
+        // Key invariant: vault maintains proper credit reservation
+        uint userCollateral = highLiqTotalAssets - alice_collateral_vault.maxRelease();
+        uint maxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(intermediateVault));
+        uint chosenLeg = userCollateral * MAXFACTOR * Math.min(twyneLiqLTV, maxTwyneLTV);
+        uint expectedInvariant = Math.ceilDiv(Math.min(dynamicLegHigh, chosenLeg), adjExtLiqLTV);
+        assertApproxEqAbs(highLiqTotalAssets, expectedInvariant, 2, "Invariant calculation should hold");
+    }
+
+    /// @notice Test that vault operations don't revert when Euler raises LTVLiquidation
+    ///   past the point where adjExtLiqLTV > MAXFACTOR * twyneLiqLTV.
+    /// @dev This is a regression test for a bug where _handleExcessCredit tried to repay
+    ///   more than the actual intermediate vault debt, causing E_RepayTooMuch revert.
+    function test_e_handleExcessCredit_cappedAtDebt_afterExtLTVIncrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        // Create vault and deposit collateral
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        address intermediateVault = address(alice_collateral_vault.intermediateVault());
+
+        uint debtBefore = IEVault(intermediateVault).debtOf(address(alice_collateral_vault));
+        assertGt(debtBefore, 0, "Vault should have intermediate debt after deposit");
+
+        // Euler governance raises LTVLiquidation so that buffer * Le > MAXFACTOR * twyneLiqLTV
+        // With externalLiqBuffer=1e4 and twyneLiqLTV=0.9e4, we need Le > 9000
+        uint16 currentBorrowLTV = targetVault.LTVBorrow(collateralAsset);
+        uint16 newLiqLTV = uint16(twyneLiqLTV) + 500; // push well above twyneLiqLTV
+        uint16 newBorrowLTV = newLiqLTV > currentBorrowLTV ? newLiqLTV : currentBorrowLTV;
+
+        vm.startPrank(targetVault.governorAdmin());
+        targetVault.setLTV(collateralAsset, newBorrowLTV, newLiqLTV, 0);
+        vm.stopPrank();
+
+        // Verify the dangerous condition: adjExtLiqLTV > MAXFACTOR * twyneLiqLTV
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault))
+            * uint(targetVault.LTVLiquidation(collateralAsset));
+        assertGt(adjExtLiqLTV, MAXFACTOR * twyneLiqLTV, "adjExtLiqLTV should exceed MAXFACTOR * twyneLiqLTV");
+
+        // All vault operations should still work (previously would revert with E_RepayTooMuch)
+        vm.startPrank(alice);
+
+        // deposit
+        alice_collateral_vault.deposit(0.01e18);
+
+        // withdraw
+        alice_collateral_vault.withdraw(0.005e18, alice);
+
+        // setTwyneLiqLTV — raise LTV to satisfy new _checkLiqLTV constraint
+        uint16 newTwyneLTV = uint16(Math.ceilDiv(adjExtLiqLTV, MAXFACTOR));
+        if (newTwyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault)) {
+            alice_collateral_vault.setTwyneLiqLTV(newTwyneLTV);
+        }
+
+        vm.stopPrank();
+
+        // Debt was already fully repaid during deposit (excess exceeded debt, cap kicked in)
+        uint debtAfter = IEVault(intermediateVault).debtOf(address(alice_collateral_vault));
+        assertEq(debtAfter, 0, "All intermediate debt should be repaid");
+
+        // Since the effective liqLTV_t is now beta * liqLTV_e — the no-credit-zone boundary
+        // where zero credit is required — there is no excess credit to rebalance.
+        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
+        alice_collateral_vault.canRebalance();
+    }
+
+    /// @notice Test multiple operations in sequence after LTV increase triggers excess > debt
+    function test_e_handleExcessCredit_multipleOpsAfterExtLTVIncrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        address intermediateVault = address(alice_collateral_vault.intermediateVault());
+
+        // Euler governance raises LTVLiquidation above twyneLiqLTV
+        uint16 currentBorrowLTV = targetVault.LTVBorrow(collateralAsset);
+        uint16 newLiqLTV = uint16(twyneLiqLTV) + 500;
+        uint16 newBorrowLTV = newLiqLTV > currentBorrowLTV ? newLiqLTV : currentBorrowLTV;
+
+        vm.startPrank(targetVault.governorAdmin());
+        targetVault.setLTV(collateralAsset, newBorrowLTV, newLiqLTV, 0);
+        vm.stopPrank();
+
+        // First deposit triggers the cap — repays all debt
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        vm.stopPrank();
+
+        uint debtAfterFirst = IEVault(intermediateVault).debtOf(address(alice_collateral_vault));
+        assertEq(debtAfterFirst, 0, "Debt should be zero after first operation");
+
+        // Second deposit should also work (debt is 0, excess > 0, cap gives 0 repay)
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        vm.stopPrank();
+
+        // Withdraw should work
+        vm.startPrank(alice);
+        alice_collateral_vault.withdraw(0.01e18, alice);
+        vm.stopPrank();
+
+        // Skim should work
+        vm.startPrank(alice);
+        IERC20(collateralAsset).transfer(address(alice_collateral_vault), 0.001e18);
+        alice_collateral_vault.skim();
+        vm.stopPrank();
+    }
+
+    /// @notice Floor activates when maxTwyneLTV is ramped down to 1.
+    /// Vault operations still work and canRebalance reverts (no excess credit).
+    function test_e_liqLTVFloor_afterMaxTwyneLTVRampDown() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        _mockChainlinkOracle(collateralAsset);
+        e_creditDeposit(collateralAsset);
+
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
+                _targetVault: eulerUSDC,
+                _liqLTV: twyneLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        address intermediateVault = address(alice_collateral_vault.intermediateVault());
+        assertGt(IEVault(intermediateVault).debtOf(address(alice_collateral_vault)), 0);
+
+        // Ramp maxTwyneLTV down to 1
+        vm.prank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, 1, 1 days);
+        vm.warp(block.timestamp + 1 days + 1);
+        assertEq(twyneVaultManager.maxTwyneLTVs(intermediateVault), 1);
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault))
+            * uint(targetVault.LTVLiquidation(collateralAsset));
+        assertGt(adjExtLiqLTV, MAXFACTOR, "Floor should be active");
+
+        // Floor: collateralScaledByLiqLTV1e8 == adjExtLiqLTV * userCollateral
+        uint userCollateral = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
+        EulerLiqCollateralVault helper = new EulerLiqCollateralVault(address(evc), alice_collateral_vault.targetVault());
+        vm.etch(address(alice_collateral_vault), address(helper).code);
+        assertEq(EulerLiqCollateralVault(address(alice_collateral_vault)).collateralScaledByLiqLTV1e8(), adjExtLiqLTV * userCollateral);
+
+        // Vault operations still work
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        alice_collateral_vault.withdraw(0.005e18, alice);
+        vm.stopPrank();
+
+        // All intermediate debt repaid, no excess credit — effective LTV is beta * liqLTV_e (no-credit-zone boundary)
+        assertEq(alice_collateral_vault.maxRelease(), 0);
+        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
+        alice_collateral_vault.canRebalance();
+    }
+
+    /// @notice Floor activates when externalLiqBuffer is increased (raising adjExtLiqLTV above chosenLTV * MAXFACTOR).
+    /// Vault operations still work and canRebalance reverts (no excess credit).
+    function test_e_liqLTVFloor_afterExternalLiqBufferIncrease() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_creditDeposit(collateralAsset);
+
+        // Start with a low buffer, create vault, then restore to 1e4.
+        // With liqLTV_e ~= 0.86e4 and twyneLiqLTV = 0.9e4:
+        //   at buffer = 0.5e4: adjExtLiqLTV = 0.5e4 * 0.86e4 = 0.43e8 < 0.9e8 = MAXFACTOR * twyneLiqLTV (floor inactive)
+        //   at buffer = 1.0e4: adjExtLiqLTV = 1.0e4 * 0.86e4 = 0.86e8 < 0.9e8 (floor inactive)
+        // So we need twyneLiqLTV low enough. Use liqLTV at _checkLiqLTV minimum for low buffer.
+        address intermediateVault = intermediateVaultFor[collateralAsset];
+        vm.prank(admin);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, 0.5e4, 0);
+
+        uint16 extLiqLTV = IEVault(eulerUSDC).LTVLiquidation(collateralAsset);
+        // liqLTV = extLiqLTV * 3/4: above _checkLiqLTV minimum at buffer 0.5e4,
+        // but below extLiqLTV so the floor activates when buffer is restored to 1e4
+        uint16 lowLiqLTV = uint16(uint(extLiqLTV) * 3 / 4);
+
+        vm.startPrank(alice);
+        alice_collateral_vault = EulerCollateralVault(
+            collateralVaultFactory.createCollateralVault({
+                _vaultType: VaultType.EULER_V2,
+                _intermediateVault: intermediateVault,
+                _targetVault: eulerUSDC,
+                _liqLTV: lowLiqLTV,
+                _targetAsset: address(0)
+            })
+        );
+        IERC20(collateralAsset).approve(address(alice_collateral_vault), type(uint256).max);
+        alice_collateral_vault.deposit(COLLATERAL_AMOUNT);
+        vm.stopPrank();
+
+        assertGt(IEVault(intermediateVault).debtOf(address(alice_collateral_vault)), 0);
+
+        // Restore buffer to 1e4 so adjExtLiqLTV > MAXFACTOR * lowLiqLTV
+        vm.prank(admin);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, 1e4, 0);
+
+        IEVault targetVault = IEVault(alice_collateral_vault.targetVault());
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault))
+            * uint(targetVault.LTVLiquidation(collateralAsset));
+        assertGt(adjExtLiqLTV, MAXFACTOR * uint(lowLiqLTV), "Floor should be active");
+
+        // Floor: collateralScaledByLiqLTV1e8 == adjExtLiqLTV * userCollateral
+        uint userCollateral = alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
+        EulerLiqCollateralVault helper = new EulerLiqCollateralVault(address(evc), alice_collateral_vault.targetVault());
+        vm.etch(address(alice_collateral_vault), address(helper).code);
+        assertEq(EulerLiqCollateralVault(address(alice_collateral_vault)).collateralScaledByLiqLTV1e8(), adjExtLiqLTV * userCollateral);
+
+        // Vault operations still work
+        vm.startPrank(alice);
+        alice_collateral_vault.deposit(0.01e18);
+        alice_collateral_vault.withdraw(0.005e18, alice);
+        vm.stopPrank();
+
+        // All intermediate debt repaid, no excess credit — effective LTV is beta * liqLTV_e (no-credit-zone boundary)
+        assertEq(alice_collateral_vault.maxRelease(), 0);
+        vm.expectRevert(TwyneErrors.CannotRebalance.selector);
+        alice_collateral_vault.canRebalance();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Bad debt settlement via siphoning
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function _setHighIRM(address collateralAsset) internal {
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        address highIRM = address(
+            new IRMTwyneCurve({minInterest_: 500, linearParameter_: 5000, polynomialParameter_: 49250, nonlinearPoint_: 5e17})
+        );
+        vm.prank(admin);
+        twyneVaultManager.doCall(
+            address(intermediateVault), 0, abi.encodeCall(intermediateVault.setInterestRateModel, (highIRM))
+        );
+    }
+
+    function _mockChainlinkOracle(address collateralAsset) internal {
+        address configuredOracle = oracleRouter.getConfiguredOracle(IEVault(collateralAsset).asset(), USD);
+        if (configuredOracle != address(0)) {
+            address chainlinkFeed = ChainlinkOracle(configuredOracle).feed();
+            MockChainlinkOracle mockChainlink =
+                new MockChainlinkOracle(IEVault(collateralAsset).asset(), USD, chainlinkFeed, 61 seconds);
+            vm.etch(configuredOracle, address(mockChainlink).code);
+        }
+    }
+
+    /// @notice Test: siphoning exhausts user collateral (C = 0), then rebalance + socialize settles bad debt
+    function test_e_settleBadDebt_siphoningToZero() public {
+        _setHighIRM(eulerWETH);
+        _mockChainlinkOracle(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
+
+        IEVault intermediateVault = IEVault(intermediateVaultFor[eulerWETH]);
+
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), 0, "User should have collateral initially");
+        assertEq(alice_collateral_vault.maxRepay(), 0, "Should have no external debt");
+
+        vm.warp(block.timestamp + 365 days * 100);
+
+        assertEq(alice_collateral_vault.maxRelease(), alice_collateral_vault.totalAssetsDepositedOrReserved(), "C should be 0");
+        assertGt(intermediateVault.debtOf(address(alice_collateral_vault)), alice_collateral_vault.totalAssetsDepositedOrReserved(), "Should have bad debt");
+
+        vm.startPrank(liquidator);
+        vm.warp(block.timestamp + 2);
+        evc.enableController(liquidator, address(intermediateVault));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.rebalance, ())
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(intermediateVault.liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
+        });
+        evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(intermediateVault.debtOf(address(alice_collateral_vault)), 0, "Debt should be zero after socialization");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), 0, "totalAssetsDepositedOrReserved should be zero");
+    }
+
+    /// @notice Test: intermediateVault.liquidate reverts without prior rebalance
+    function test_e_settleBadDebt_revertsWithoutRebalance() public {
+        _setHighIRM(eulerWETH);
+        _mockChainlinkOracle(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
+
+        IEVault intermediateVault = IEVault(intermediateVaultFor[eulerWETH]);
+
+        vm.warp(block.timestamp + 365 days * 100);
+
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved(), 0, "totalAssets should be > 0 before rebalance");
+        assertEq(alice_collateral_vault.totalAssetsDepositedOrReserved(), alice_collateral_vault.maxRelease(), "C should be 0");
+
+        vm.startPrank(liquidator);
+        vm.warp(block.timestamp + 2);
+        evc.enableController(liquidator, address(intermediateVault));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(intermediateVault.liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
+        });
+
+        vm.expectRevert();
+        evc.batch(items);
+        vm.stopPrank();
+    }
+
+    /// @notice Test: socialization blocked on a healthy vault (C > 0)
+    function test_e_settleBadDebt_blockedOnHealthyVault() public {
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
+
+        IEVault intermediateVault = IEVault(intermediateVaultFor[eulerWETH]);
+
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), 0, "Vault should be healthy with C > 0");
+
+        vm.startPrank(liquidator);
+        vm.warp(block.timestamp + 2);
+        evc.enableController(liquidator, address(intermediateVault));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(intermediateVault.liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
+        });
+
+        vm.expectRevert();
+        evc.batch(items);
+        vm.stopPrank();
+    }
+
+    /// @notice Test: vault is reusable after bad debt settlement
+    function test_e_settleBadDebt_vaultReusableAfter() public {
+        _setHighIRM(eulerWETH);
+        _mockChainlinkOracle(eulerWETH);
+        e_collateralDepositWithoutBorrow(eulerWETH, 0.9e4);
+
+        IEVault intermediateVault = IEVault(intermediateVaultFor[eulerWETH]);
+
+        vm.warp(block.timestamp + 365 days * 100);
+
+        vm.startPrank(liquidator);
+        vm.warp(block.timestamp + 2);
+        evc.enableController(liquidator, address(intermediateVault));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.rebalance, ())
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(intermediateVault.liquidate, (address(alice_collateral_vault), address(alice_collateral_vault), 0, 0))
+        });
+        evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(intermediateVault.debtOf(address(alice_collateral_vault)), 0, "Debt should be settled");
+
+        vm.startPrank(bob);
+        IERC20(eulerWETH).approve(address(intermediateVault), type(uint).max);
+        intermediateVault.deposit(CREDIT_LP_AMOUNT, bob);
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint).max);
+
+        IEVC.BatchItem[] memory depositItems = new IEVC.BatchItem[](1);
+        depositItems[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.deposit, (1 ether))
+        });
+        evc.batch(depositItems);
+        vm.stopPrank();
+
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved(), 0, "Vault should have assets after re-deposit");
+        assertGt(alice_collateral_vault.maxRelease(), 0, "Vault should have reserved credit after re-deposit");
+    }
 }

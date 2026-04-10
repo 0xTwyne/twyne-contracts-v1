@@ -32,9 +32,10 @@ contract EulerLiquidationTest is EulerTestBase {
     function test_e_preLiquidationSetup(uint16 liqLTV) public {
         // copy logic from checkLiqLTV
         uint16 minLTV = IEVault(eulerUSDC).LTVLiquidation(eulerWETH);
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(eulerWETH);
+        address intermediateVault = intermediateVaultFor[eulerWETH];
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(eulerWETH));
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault));
         // Bob deposits into eeWETH_intermediate_vault to earn boosted yield
         vm.startPrank(bob);
         IERC20(eulerWETH).approve(address(eeWETH_intermediate_vault), type(uint256).max);
@@ -46,7 +47,7 @@ contract EulerLiquidationTest is EulerTestBase {
         alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: liqLTV,
                 _targetAsset: address(0)
@@ -76,7 +77,7 @@ contract EulerLiquidationTest is EulerTestBase {
 
         // Use the first liquidation condition in _canLiquidate
         (uint256 externalCollateralValueScaledByLiqLTV, ) = IEVault(alice_collateral_vault.targetVault()).accountLiquidity(address(alice_collateral_vault), true);
-        uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(alice_collateral_vault.asset())) * externalCollateralValueScaledByLiqLTV / MAXFACTOR;
+        uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()))) * externalCollateralValueScaledByLiqLTV / MAXFACTOR;
 
         uint USDCPrice = eulerOnChain.getQuote(1, USDC, USD); // returns a value times 1e10
 
@@ -166,7 +167,7 @@ contract EulerLiquidationTest is EulerTestBase {
         test_e_preLiquidationSetup(liqLTV);
 
         // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -206,7 +207,7 @@ contract EulerLiquidationTest is EulerTestBase {
 
         // To put the vault into a liquidatable state, don't warp, but alter the safety buffer
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, 0.8e4);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.8e4, 0);
         vm.stopPrank();
 
         // Verify debt to intermediate vault increased
@@ -223,6 +224,51 @@ contract EulerLiquidationTest is EulerTestBase {
         IERC20(eulerWETH).approve(address(alice_collateral_vault), type(uint256).max);
 
         vm.stopPrank();
+    }
+
+    function test_e_setupLiquidationFromSafetyBufferRampDown() public noGasMetering {
+        test_e_preLiquidationSetup(twyneLiqLTV);
+
+        // Verify position is healthy before ramp
+        assertFalse(alice_collateral_vault.canLiquidate(), "Vault should be healthy before ramp");
+
+        // Start a ramp-down of externalLiqBuffer from 1e4 → 0.8e4 over 1000 seconds
+        vm.startPrank(admin);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.8e4, 1000);
+        vm.stopPrank();
+
+        // Immediately after starting ramp, effective buffer is still ~1e4, position should be healthy
+        assertFalse(alice_collateral_vault.canLiquidate(), "Vault should still be healthy at ramp start");
+
+        // Warp to end of ramp — buffer is now 0.8e4, same as the immediate change test above
+        vm.warp(block.timestamp + 1000);
+
+        // Position should now be liquidatable (same as test_e_setupLiquidationFromSafetyBufferChange)
+        assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be liquidatable after ramp completes");
+    }
+
+    function test_e_setupLiquidationFromMaxLTVRampDown() public noGasMetering {
+        test_e_preLiquidationSetup(twyneLiqLTV);
+
+        // Verify position is healthy before ramp
+        assertFalse(alice_collateral_vault.canLiquidate(), "Vault should be healthy before ramp");
+
+        // Start a ramp-down of maxTwyneLTV from 0.93e4 → 0.8e4 over 1000 seconds
+        // When maxTwyneLTVs drops below twyneLiqLTV (0.9e4), it caps the effective LTV in
+        // _collateralScaledByLiqLTV1e8, reducing collateral value and triggering liquidation
+        vm.startPrank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 0.8e4, 1000);
+        vm.stopPrank();
+
+        // Immediately after starting ramp, effective maxTwyneLTV is still ~0.93e4 (above twyneLiqLTV)
+        assertFalse(alice_collateral_vault.canLiquidate(), "Vault should still be healthy at ramp start");
+
+        // Warp to end of ramp — maxTwyneLTV is now 0.8e4, below twyneLiqLTV (0.9e4)
+        vm.warp(block.timestamp + 1000);
+
+        // Position should now be liquidatable because Math.min(twyneLiqLTV, maxTwyneLTVs) = 0.8e4
+        // reduces collateralValueScaledByLiqLTV in the second _canLiquidate condition
+        assertTrue(alice_collateral_vault.canLiquidate(), "Vault should be liquidatable after maxLTV ramp completes");
     }
 
     function test_e_setupLiquidationFromExternalLTVChange(uint16 liqLTV) public noGasMetering {
@@ -278,7 +324,7 @@ contract EulerLiquidationTest is EulerTestBase {
         vm.stopPrank();
 
                 // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -420,11 +466,11 @@ contract EulerLiquidationTest is EulerTestBase {
 
     function test_e_handleExternalLiquidationWithZeroMaxRelease() public noGasMetering {
         // Calculate minimum LTV so the collateral vault mimics a position on the underlying protocol
-        uint16 minimumLTV = uint16(uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffers(eulerWETH)) / MAXFACTOR);
+        uint16 minimumLTV = uint16(uint(IEVault(eulerUSDC).LTVLiquidation(eulerWETH)) * uint(twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault))) / MAXFACTOR);
         test_e_preLiquidationSetup(minimumLTV);
 
         // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -784,7 +830,7 @@ contract EulerLiquidationTest is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1052,7 +1098,7 @@ contract EulerLiquidationTest is EulerTestBase {
         test_e_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         // skip this test with high safety buffers
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)) < 0.975e4) {
             // make the collateral value worthless
             address eulerRouter = IEVault(eulerWETH).oracle();
             vm.startPrank(EulerRouter(eulerRouter).governor());
@@ -1113,7 +1159,7 @@ contract EulerLiquidationTest is EulerTestBase {
     // We have disabled EVK vault liquidation (BridgeHookTarget is called on EVK liquidation which reverts).
     function test_e_liquidate_bad_evk_debt_accrue_interest() public noGasMetering {
         // Set max twyneLiqLTV value
-        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerWETH);
+        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault));
         test_e_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
@@ -1216,7 +1262,7 @@ contract EulerLiquidationTest is EulerTestBase {
 
         // Skip this test with high safety buffers
         // Undo the process of putting the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(eulerWETH) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp - 600);  // reverse the accrual of 10 minutes of interest
 
@@ -1333,7 +1379,7 @@ contract EulerLiquidationTest is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -1612,7 +1658,7 @@ contract EulerLiquidationTest is EulerTestBase {
     // We have disabled EVK vault liquidation (BridgeHookTarget is called on EVK liquidation which reverts).
     function test_e_liquidate_bad_evk_debt_safetybuffer() public noGasMetering {
         // Set max twyneLiqLTV value
-        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(eulerWETH);
+        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault));
         test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
@@ -1715,7 +1761,7 @@ contract EulerLiquidationTest is EulerTestBase {
 
         // reverse the liquidation condition
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(eulerWETH, externalLiqBufferInitial);
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), externalLiqBufferInitial, 0);
         vm.stopPrank();
 
         vm.startPrank(alice);
@@ -1830,7 +1876,7 @@ contract EulerLiquidationTest is EulerTestBase {
         EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -2280,5 +2326,113 @@ contract EulerLiquidationTest is EulerTestBase {
         assertEq(alice_collateral_vault.borrower(), alice, "Wrong collateral vault owner after liquidation");
 
         vm.stopPrank();
+    }
+
+    // Test: Liquidator has no collateral asset (eWETH), only debt asset (USDC).
+    // After liquidation, sources collateral from the vault they just acquired via withdraw,
+    // then approves the vault so checkVaultStatus can transferFrom to pay the previous borrower.
+    function test_e_liquidate_noCollateralAsset_sourceFromVault() public noGasMetering {
+        // Use safety buffer change to trigger liquidation — this produces a milder
+        // liquidation condition than interest accrual, keeping the position in case 3
+        // (mildly unhealthy) so collateralForBorrower > 0.
+        test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
+
+        address collateral = eulerWETH;
+
+        // Ensure liquidator has NO collateral tokens, only USDC
+        uint256 liquidatorCollateralBal = IERC20(collateral).balanceOf(liquidator);
+        if (liquidatorCollateralBal > 0) {
+            vm.prank(liquidator);
+            IERC20(collateral).transfer(address(1), liquidatorCollateralBal);
+        }
+        assertEq(IERC20(collateral).balanceOf(liquidator), 0, "Liquidator should have zero collateral tokens");
+        assertGt(IERC20(USDC).balanceOf(liquidator), 0, "Liquidator should have USDC");
+
+        assertEq(alice_collateral_vault.borrower(), alice, "Wrong vault owner before liquidation");
+
+        uint256 alicePreLiqBalance = IERC20(collateral).balanceOf(alice);
+
+        // Avoid liquidation cooloff
+        vm.warp(block.timestamp + 12);
+
+        vm.startPrank(liquidator);
+        IERC20(USDC).approve(address(alice_collateral_vault), type(uint).max);
+        IERC20(collateral).approve(address(alice_collateral_vault), type(uint).max);
+
+        // Batch: liquidate → repay all Euler debt → withdraw collateral (now owned by liquidator)
+        // The withdraw gives the liquidator collateral tokens. checkVaultStatus at batch end
+        // will transferFrom(liquidator, alice, collateralForBorrower) using the approval above.
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.liquidate, ())
+        });
+
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.repay, (alice_collateral_vault.maxRepay()))
+        });
+
+        items[2] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.withdraw, (type(uint).max, liquidator))
+        });
+
+        evc.batch(items);
+        vm.stopPrank();
+
+        // Verify liquidator is now the owner
+        assertEq(alice_collateral_vault.borrower(), liquidator, "Liquidator should own the vault");
+
+        // Verify vault is fully unwound
+        assertEq(alice_collateral_vault.maxRepay(), 0, "Should have no Euler debt");
+        assertEq(alice_collateral_vault.maxRelease(), 0, "Should have no intermediate vault debt");
+
+        // Verify alice received her collateral payout (collateralForBorrower > 0 for mildly unhealthy)
+        assertGt(IERC20(collateral).balanceOf(alice), alicePreLiqBalance, "Alice should have received borrower payout");
+    }
+
+    // Regression test for deferred borrower payout: once a liquidation is pending settlement,
+    // a second liquidate() in the same EVC batch must revert instead of overwriting it.
+    function test_e_liquidate_fails_secondLiquidation_sameBatch() public noGasMetering {
+        // Use safety buffer change to keep the position only mildly unhealthy, so the first
+        // liquidation records a non-zero collateralForLiquidatedBorrower.
+        test_e_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
+
+        // Avoid liquidation cooloff
+        vm.warp(block.timestamp + 12);
+
+        // Allow liquidator to submit the batch on behalf of eve for the second liquidation attempt.
+        vm.prank(eve);
+        evc.setAccountOperator(eve, liquidator, true);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.liquidate, ())
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: eve,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.liquidate, ())
+        });
+
+        vm.startPrank(liquidator);
+        vm.expectRevert(TwyneErrors.AlreadyLiquidated.selector);
+        evc.batch(items);
+        vm.stopPrank();
+
+        // The whole batch should revert, leaving the original borrower unchanged.
+        assertEq(alice_collateral_vault.borrower(), alice, "Wrong collateral vault owner after reverted batch");
     }
 }

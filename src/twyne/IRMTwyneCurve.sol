@@ -5,47 +5,36 @@ pragma solidity ^0.8.28;
 import {IIRM} from "euler-vault-kit/InterestRateModels/IIRM.sol";
 import {SECONDS_PER_YEAR} from "euler-vault-kit/EVault/shared/Constants.sol";
 
-/// @title IRMLinearKink
+/// @title IRMTwyneCurve
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @notice Implementation of a curved interest rate model
-/// @notice interest rate grows linearly with utilization and increases faster after reaching a kink
+/// @notice Interest rate = minInterest + linearParameter * u + polynomialParameter * u^12
+/// @notice This variant uses polynomial gamma of 12
 contract IRMTwyneCurve is IIRM {
-    /// @notice Approx interest rate at linearKinkUtilizationRate
-    uint public immutable idealKinkInterestRate; // 0.6e4 = 60%
-    /// @notice Utilization rate value used in calculating IRM parameters
-    /// @notice beyond this utilization rate, the polynomial term dominates (this value must be greater than nonlinearPoint)
-    /// @notice while this is a utilization rate that would have 1e18 decimals, it is ONLY used to derive curve params so use 1e4
-    uint public immutable linearKinkUtilizationRate; // 0.8e4 = 80%
-    /// @notice Max interest rate applied at 100% utilization
-    uint public immutable maxInterestRate; // 5e4 = 500%
-
     /// @notice When utilization rate is less than nonlinearPoint, assume linear model (polynomial term is not significant)
     uint public immutable nonlinearPoint; // 5e17 = 50%
 
-    /// @notice Curve parameters
-    uint public immutable linearParameter;
-    uint public immutable polynomialParameter;
+    uint public immutable minInterest; // 1e22 precision
+    uint public immutable linearParameter; // 1e4 precision
+    uint public immutable polynomialParameter; // 1e4 precision
 
-    /// @notice LTV values have 1e4 decimals
     uint internal constant MAXFACTOR = 1e4;
 
-    constructor(uint16 idealKinkInterestRate_, uint16 linearKinkUtilizationRate_, uint16 maxInterestRate_, uint nonlinearPoint_) {
+    /// @param minInterest_ 1e4 precision
+    /// @param linearParameter_ 1e4 precision
+    /// @param polynomialParameter_ 1e4 precision
+    /// @param nonlinearPoint_ 1e18 precision
+    constructor(uint minInterest_, uint linearParameter_, uint polynomialParameter_, uint nonlinearPoint_) {
         if (
-            idealKinkInterestRate_ > maxInterestRate_
-            || linearKinkUtilizationRate_ > MAXFACTOR
-            // || idealKinkInterestRate_ == 0
-            || linearKinkUtilizationRate_ == 0
-            || maxInterestRate_ == 0
+            polynomialParameter_ == 0
             || nonlinearPoint_ == 0
-            || nonlinearPoint_ >= 1e14 * uint(linearKinkUtilizationRate_) // 1e14 is to align decimals
+            || nonlinearPoint_ >= 1e18 // nonlinear point must be less than 100%
         ) revert E_IRMUpdateUnauthorized();
 
-        idealKinkInterestRate = idealKinkInterestRate_;
-        linearKinkUtilizationRate = linearKinkUtilizationRate_;
-        maxInterestRate = maxInterestRate_;
+        minInterest = minInterest_ * 1e18;
+        linearParameter = linearParameter_;
+        polynomialParameter = polynomialParameter_;
         nonlinearPoint = nonlinearPoint_;
-        linearParameter = idealKinkInterestRate * MAXFACTOR / linearKinkUtilizationRate_;
-        polynomialParameter = maxInterestRate_ - linearParameter;
     }
 
     /// @inheritdoc IIRM
@@ -70,7 +59,7 @@ contract IRMTwyneCurve is IIRM {
         return computeInterestRateInternal(vault, cash, borrows);
     }
 
-    function computeInterestRateInternal(address, uint cash, uint borrows) internal view returns (uint ir) {
+    function computeInterestRateInternal(address, uint cash, uint borrows) internal view virtual returns (uint ir) {
         uint totalAssets = cash + borrows;
 
         // utilization has decimals of 1e18, where 1e18 = 100%
@@ -78,22 +67,24 @@ contract IRMTwyneCurve is IIRM {
             ? 0 // prevent divide by zero case by returning zero
             : borrows * 1e18 / totalAssets;
 
-        ir = linearParameter * utilization;
+        ir = minInterest + linearParameter * utilization;
 
         if (utilization > nonlinearPoint) {
-            // Use gamma of 12
-            // utilization^2
-            uint utilTemp4 = (utilization * utilization) / 1e18;
-            // utilization^4
-            utilTemp4 = (utilTemp4 * utilTemp4) / 1e18;
-            // utilization^8
-            uint utilpow = (utilTemp4 * utilTemp4) / 1e18;
-            // utilization^12
-            utilpow = (utilpow * utilTemp4) / 1e18;
-
-            ir += polynomialParameter * utilpow;
+            ir += polynomialParameter * _computeUtilPow(utilization);
         }
 
         ir = (ir * (1e9 / MAXFACTOR)) / SECONDS_PER_YEAR; // has 1e27 decimals
+    }
+
+    /// @notice Computes utilization^gamma (gamma = 12 for this contract)
+    function _computeUtilPow(uint utilization) internal pure virtual returns (uint utilpow) {
+        // utilization^2
+        uint utilTemp4 = (utilization * utilization) / 1e18;
+        // utilization^4
+        utilTemp4 = (utilTemp4 * utilTemp4) / 1e18;
+        // utilization^8
+        utilpow = (utilTemp4 * utilTemp4) / 1e18;
+        // utilization^12
+        utilpow = (utilpow * utilTemp4) / 1e18;
     }
 }

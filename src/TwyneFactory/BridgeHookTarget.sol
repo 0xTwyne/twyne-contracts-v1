@@ -30,7 +30,8 @@ contract BridgeHookTarget is IErrors {
 
     function liquidate(address violator, address /*collateral*/, uint /*repayAssets*/, uint /*minYieldBalance*/) external view {
         require(collateralVaultFactory.isCollateralVault(violator), ViolatorNotCollateralVault());
-        require(CollateralVaultBase(violator).borrower() == address(0), NotExternallyLiquidated());
+        // Allow EVK debt socialization when collateral vault doesn't have assets
+        require(CollateralVaultBase(violator).totalAssetsDepositedOrReserved() == 0, NotExternallyLiquidated());
     }
 
     fallback() external {

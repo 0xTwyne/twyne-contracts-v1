@@ -29,7 +29,7 @@ contract AaveFrontendTests is AaveTestBase {
 
     // Deposit WSTETH (underlying asset) in intermediate vault
     function test_aave_frontend_underlyingCreditDeposit_WithApprove() public noGasMetering {
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(address(aWSTETHWrapper)));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[address(aWSTETHWrapper)]);
 
         // Give alice some WSTETH to deposit
         uint256 depositAmount = 10 ether;
@@ -58,7 +58,7 @@ contract AaveFrontendTests is AaveTestBase {
 
     // Deposit WSTETH (underlying asset) in intermediate vault using Permit2
     function test_aave_frontend_underlyingCreditDeposit_WithPermit2() public noGasMetering {
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(address(aWSTETHWrapper)));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[address(aWSTETHWrapper)]);
 
         // Give alice some WSTETH to deposit
         uint256 depositAmount = 10 ether;
@@ -116,7 +116,7 @@ contract AaveFrontendTests is AaveTestBase {
 
     // Deposit aWSTETH (aToken) in intermediate vault using approve
     function test_aave_frontend_creditDeposit_AToken_WithApprove() public noGasMetering {
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(address(aWSTETHWrapper)));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[address(aWSTETHWrapper)]);
         address aWSTETH = aWSTETHWrapper.aToken();
 
         // First give alice some WSTETH and deposit to Aave to get aWSTETH
@@ -159,7 +159,7 @@ contract AaveFrontendTests is AaveTestBase {
 
     // Deposit aWSTETH (aToken) in intermediate vault using aToken permit
     function test_aave_frontend_creditDeposit_AToken_WithPermit() public noGasMetering {
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(address(aWSTETHWrapper)));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[address(aWSTETHWrapper)]);
         address aWSTETH = aWSTETHWrapper.aToken();
 
         // First give alice some WSTETH and deposit to Aave to get aWSTETH
@@ -239,7 +239,7 @@ contract AaveFrontendTests is AaveTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, collateralAsset, aavePool, twyneLiqLTV, USDC))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, intermediateVaultFor[collateralAsset], aavePool, twyneLiqLTV, USDC))
         });
         vm.startPrank(alice);
         (IEVC.BatchItemResult[] memory batchItemsResult,,) = evc.batchSimulation(items);
@@ -272,7 +272,7 @@ contract AaveFrontendTests is AaveTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, collateralAsset, aavePool, twyneLiqLTV, USDC))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, intermediateVaultFor[collateralAsset], aavePool, twyneLiqLTV, USDC))
         });
         // Perform Permit2 on the collateral vault
         items[1] = IEVC.BatchItem({
@@ -329,7 +329,7 @@ contract AaveFrontendTests is AaveTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, collateralAsset, aavePool, twyneLiqLTV, USDC))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, intermediateVaultFor[collateralAsset], aavePool, twyneLiqLTV, USDC))
         });
         vm.startPrank(alice);
         (IEVC.BatchItemResult[] memory batchItemsResult,,) = evc.batchSimulation(items);
@@ -350,7 +350,7 @@ contract AaveFrontendTests is AaveTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, collateralAsset, aavePool, twyneLiqLTV, USDC))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, intermediateVaultFor[collateralAsset], aavePool, twyneLiqLTV, USDC))
         });
         // deposit aTokens into wrapper (which deposits to collateral vault)
         items[1] = IEVC.BatchItem({
@@ -556,7 +556,7 @@ contract AaveFrontendTests is AaveTestBase {
         AaveV3CollateralVault collateral_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC
@@ -604,7 +604,7 @@ contract AaveFrontendTests is AaveTestBase {
 
     // Withdraw aTokens from intermediate vault
     function test_aave_frontend_withdrawATokenFromIntermediateVault() external noGasMetering {
-        IEVault intermediate_vault = IEVault(twyneVaultManager.getIntermediateVault(address(aWSTETHWrapper)));
+        IEVault intermediate_vault = IEVault(intermediateVaultFor[address(aWSTETHWrapper)]);
         address aWSTETH = aWSTETHWrapper.aToken();
 
         // Give alice some WSTETH to deposit
@@ -669,7 +669,7 @@ contract AaveFrontendTests is AaveTestBase {
         AaveV3CollateralVault collateral_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: collateralAsset,
+                _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC

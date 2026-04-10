@@ -54,9 +54,10 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     function createInitialPosition(uint256 C, uint256, /* CLP */ uint256 B, uint256 twyneLTV) public {
         // Pre-setup checks
         uint16 minLTV = uint16(getLiqLTV(address(aWETHWrapper), USDC));
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(aWETHWrapper));
+        address intermediateVault = intermediateVaultFor[address(aWETHWrapper)];
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
         require(uint256(minLTV) * uint256(extLiqBuffer) <= uint256(twyneLTV) * MAXFACTOR, "precond fail");
-        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(address(aWETHWrapper)), "twyneLTV too high");
+        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault), "twyneLTV too high");
 
         aave_creditDeposit(address(aWETHWrapper));
 
@@ -64,7 +65,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLTV,
                 _targetAsset: USDC
@@ -105,6 +106,22 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         MockAaveFeed mockAaveFeed = new MockAaveFeed();
         vm.etch(wethFeed, address(mockAaveFeed).code);
         MockAaveFeed(wethFeed).setPrice(newPrice);
+    }
+
+    function _setWethPrice(uint256 newPrice) internal {
+        address wethFeed = getAaveOracleFeed(WETH);
+        MockAaveFeed mockAaveFeed = new MockAaveFeed();
+        vm.etch(wethFeed, address(mockAaveFeed).code);
+        MockAaveFeed(wethFeed).setPrice(newPrice);
+    }
+
+    function _setWethPriceForTargetHF(uint256 targetHF) internal {
+        (, , , , , uint256 hf) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
+        require(hf > 0, "hf=0");
+        uint256 currentPrice = getAavePrice(WETH);
+        uint256 newPrice = (currentPrice * targetHF) / hf;
+        require(newPrice > 0, "price=0");
+        _setWethPrice(newPrice);
     }
 
     function setup_approve_customSetup() internal {
@@ -194,7 +211,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         ( , uint256 totalDebtBase, , , , ) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
         data.B_left = totalDebtBase;
         
-        data.max_liqLTV_t = twyneVaultManager.maxTwyneLTVs(alice_aave_vault.asset());
+        data.max_liqLTV_t = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()));
         
         data.C_left_USD = uint(aWETHWrapper.latestAnswer()) * data.C_left / 1e18;
         
@@ -255,6 +272,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         executePriceDrop(32);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(50); 
+        _setWethPriceForTargetHF(1.05e18);
         executeHandleExternalLiquidation();
         assertEq(alice_aave_vault.borrower(), address(0), "owner is not 0");
         assertEq(alice_aave_vault.totalAssetsDepositedOrReserved(), 0, "totalAssetsDepositedOrReserved is not 0");
@@ -266,6 +284,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(20); 
         _logPostFallbackAccounting();
+        _setWethPriceForTargetHF(1.05e18);
         executeHandleExternalLiquidation();
         assertEq(alice_aave_vault.borrower(), address(0), "owner is not 0");
         assertEq(alice_aave_vault.totalAssetsDepositedOrReserved(), 0, "totalAssetsDepositedOrReserved is not 0");
@@ -276,6 +295,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         executePriceDrop(35);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(15); 
+        _setWethPriceForTargetHF(1.05e18);
         executeHandleExternalLiquidation();
         assertEq(alice_aave_vault.borrower(), address(0), "owner is not 0");
         assertEq(alice_aave_vault.totalAssetsDepositedOrReserved(), 0, "totalAssetsDepositedOrReserved is not 0");
@@ -374,6 +394,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         executePriceDrop(32);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(40);
+        _setWethPriceForTargetHF(1.05e18);
         vm.startPrank(liquidator);
         vm.expectRevert(TwyneErrors.NoLiquidationForZeroReserve.selector);
         evc.call({

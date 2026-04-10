@@ -31,18 +31,19 @@ contract AaveLiquidationTest is AaveTestBase {
     function setUp() public override {
         super.setUp();
         vm.startPrank(admin);
-        //twyneVaultManager.setExternalLiqBuffer(address(aWETHWrapper), 0.98e4);
-        twyneVaultManager.setExternalLiqBuffer(address(aWETHWrapper), 1e4);
-	    vm.stopPrank();
+        // twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), 0.98e4, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), 1e4, 0);
+        vm.stopPrank();
     }
 
     function test_aave_preLiquidationSetup(uint16 liqLTV) public {
         // copy logic from checkLiqLTV
         address collateral = address(aWETHWrapper);
         uint16 minLTV = uint16(getLiqLTV(collateral));
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(collateral);
+        address intermediateVault = intermediateVaultFor[collateral];
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(collateral));
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault));
         // Bob deposits into eeWETH_intermediate_vault to earn boosted yield
         vm.startPrank(bob);
         IERC20(collateral).approve(address(aaveEthVault), type(uint256).max);
@@ -54,7 +55,7 @@ contract AaveLiquidationTest is AaveTestBase {
         alice_aave_vault = AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: collateral,
+                _intermediateVault: intermediateVaultFor[collateral],
                 _targetVault: aavePool,
                 _liqLTV: liqLTV,
                 _targetAsset: USDC
@@ -92,7 +93,7 @@ contract AaveLiquidationTest is AaveTestBase {
         (,,uint availableBorrowsBase,,,) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
         availableBorrowsBase = availableBorrowsBase/1e2;
         console2.log("Available borrow base init: ", availableBorrowsBase);
-        uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(alice_aave_vault.asset())) * availableBorrowsBase / MAXFACTOR;
+        uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault()))) * availableBorrowsBase / MAXFACTOR;
 
         uint USDCPrice = getAavePrice(USDC); // returns a value times 1e10
 
@@ -107,11 +108,11 @@ contract AaveLiquidationTest is AaveTestBase {
 
         console2.log("Amount 1: ", borrowAmountUSD1);
         console2.log("Amount 2: ", borrowAmountUSD2);
+
         // Assume the user max borrows to arrive at the extreme limit of what is possible without liquidation
         vm.startPrank(alice);
-
         // BORROW_USD_AMOUNT-10 is used to avoid insufficient collateral issue which cause borrowing to fail
-	    alice_aave_vault.borrow(BORROW_USD_AMOUNT - 10, alice);
+        alice_aave_vault.borrow(BORROW_USD_AMOUNT - 10, alice);
 
         (,,availableBorrowsBase,,,) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
         uint amountToBorrow = 1;
@@ -190,9 +191,8 @@ contract AaveLiquidationTest is AaveTestBase {
     // This accrues interest only for low safety buffers, otherwise it triggers liquidation by price movement of mock oracle
     function test_aave_setupLiquidationAccrueInterest(uint16 liqLTV) public noGasMetering {
         test_aave_preLiquidationSetup(liqLTV);
-        address collateralAsset = address(aWETHWrapper);
         // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(collateralAsset) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -228,7 +228,7 @@ contract AaveLiquidationTest is AaveTestBase {
 
         // To put the vault into a liquidatable state, don't warp, but alter the safety buffer
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(address(aWETHWrapper), 0.8e4);
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), 0.8e4, 0);
         vm.stopPrank();
 
         // Verify debt to intermediate vault increased
@@ -247,6 +247,51 @@ contract AaveLiquidationTest is AaveTestBase {
         vm.stopPrank();
     }
 
+
+    function test_aave_setupLiquidationFromSafetyBufferRampDown() public noGasMetering {
+        test_aave_preLiquidationSetup(twyneLiqLTV);
+
+        // Verify position is healthy before ramp
+        assertFalse(alice_aave_vault.canLiquidate(), "Vault should be healthy before ramp");
+
+        // Start a ramp-down of externalLiqBuffer from 1e4 → 0.8e4 over 1000 seconds
+        vm.startPrank(admin);
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), 0.8e4, 1000);
+        vm.stopPrank();
+
+        // Immediately after starting ramp, effective buffer is still ~1e4, position should be healthy
+        assertFalse(alice_aave_vault.canLiquidate(), "Vault should still be healthy at ramp start");
+
+        // Warp to end of ramp — buffer is now 0.8e4, same as the immediate change test above
+        vm.warp(block.timestamp + 1000);
+
+        // Position should now be liquidatable (same as test_aave_setupLiquidationFromSafetyBufferChange)
+        assertTrue(alice_aave_vault.canLiquidate(), "Vault should be liquidatable after ramp completes");
+    }
+
+    function test_aave_setupLiquidationFromMaxLTVRampDown() public noGasMetering {
+        test_aave_preLiquidationSetup(twyneLiqLTV);
+
+        // Verify position is healthy before ramp
+        assertFalse(alice_aave_vault.canLiquidate(), "Vault should be healthy before ramp");
+
+        // Start a ramp-down of maxTwyneLTV from 0.93e4 → 0.8e4 over 1000 seconds
+        // When maxTwyneLTVs drops below twyneLiqLTV (0.9e4), it caps the effective LTV in
+        // _collateralScaledByLiqLTV1e8, reducing collateral value and triggering liquidation
+        vm.startPrank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(address(aaveEthVault), 0.8e4, 1000);
+        vm.stopPrank();
+
+        // Immediately after starting ramp, effective maxTwyneLTV is still ~0.93e4 (above twyneLiqLTV)
+        assertFalse(alice_aave_vault.canLiquidate(), "Vault should still be healthy at ramp start");
+
+        // Warp to end of ramp — maxTwyneLTV is now 0.8e4, below twyneLiqLTV (0.9e4)
+        vm.warp(block.timestamp + 1000);
+
+        // Position should now be liquidatable because Math.min(twyneLiqLTV, maxTwyneLTVs) = 0.8e4
+        // reduces collateralValueScaledByLiqLTV in the second _canLiquidate condition
+        assertTrue(alice_aave_vault.canLiquidate(), "Vault should be liquidatable after maxLTV ramp completes");
+    }
 
     function test_aave_setupLiquidationFromExternalLTVChange(uint16 liqLTV) public noGasMetering {
         test_aave_preLiquidationSetup(liqLTV);
@@ -302,7 +347,7 @@ contract AaveLiquidationTest is AaveTestBase {
         vm.stopPrank();
 
                 // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(collateralAsset) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -443,11 +488,11 @@ contract AaveLiquidationTest is AaveTestBase {
     function test_aave_handleExternalLiquidationWithZeroMaxRelease() public noGasMetering {
         // Calculate minimum LTV so the collateral vault mimics a position on the underlying protocol
         address collateralAsset = address(aWETHWrapper);
-        uint16 minimumLTV = uint16(getLiqLTV(collateralAsset) * uint(twyneVaultManager.externalLiqBuffers(collateralAsset)) / MAXFACTOR);
+        uint16 minimumLTV = uint16(getLiqLTV(collateralAsset) * uint(twyneVaultManager.externalLiqBuffers(address(aaveEthVault))) / MAXFACTOR);
         test_aave_preLiquidationSetup(minimumLTV);
 
         // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(collateralAsset) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -801,7 +846,7 @@ contract AaveLiquidationTest is AaveTestBase {
         AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC
@@ -1065,13 +1110,115 @@ contract AaveLiquidationTest is AaveTestBase {
         vm.stopPrank();
     }
 
+    // Test: Liquidator has no collateral asset (wrapper shares), only debt asset (USDC).
+    // After liquidation, sources wrapper shares from the vault they just acquired via withdraw,
+    // then approves the vault so checkVaultStatus can transferFrom to pay the previous borrower.
+    function test_aave_liquidate_noCollateralAsset_sourceFromVault() public noGasMetering {
+        test_aave_setupLiquidationAccrueInterest(twyneLiqLTV);
+
+        address collateral = address(aWETHWrapper);
+
+        // Ensure liquidator has NO wrapper shares, only USDC
+        uint256 liquidatorWrapperBal = IERC20(collateral).balanceOf(liquidator);
+        if (liquidatorWrapperBal > 0) {
+            vm.prank(liquidator);
+            IERC20(collateral).transfer(address(1), liquidatorWrapperBal);
+        }
+        assertEq(IERC20(collateral).balanceOf(liquidator), 0, "Liquidator should have zero wrapper shares");
+        assertGt(IERC20(USDC).balanceOf(liquidator), 0, "Liquidator should have USDC");
+
+        assertEq(alice_aave_vault.borrower(), alice, "Wrong vault owner before liquidation");
+
+        uint256 alicePreLiqBalance = IERC20(collateral).balanceOf(alice);
+
+        // Avoid liquidation cooloff
+        vm.warp(block.timestamp + 12);
+
+        vm.startPrank(liquidator);
+        IERC20(USDC).approve(address(alice_aave_vault), type(uint).max);
+        IERC20(collateral).approve(address(alice_aave_vault), type(uint).max);
+
+        // Batch: liquidate → repay all Aave debt → withdraw collateral (now owned by liquidator)
+        // The withdraw gives the liquidator wrapper shares. checkVaultStatus at batch end
+        // will transferFrom(liquidator, alice, collateralForBorrower) using the approval above.
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.liquidate, ())
+        });
+
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.repay, (alice_aave_vault.maxRepay()))
+        });
+
+        items[2] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.withdraw, (type(uint).max, liquidator))
+        });
+
+        evc.batch(items);
+        vm.stopPrank();
+
+        // Verify liquidator is now the owner
+        assertEq(alice_aave_vault.borrower(), liquidator, "Liquidator should own the vault");
+
+        // Verify vault is fully unwound
+        assertEq(alice_aave_vault.maxRepay(), 0, "Should have no Aave debt");
+        assertEq(alice_aave_vault.maxRelease(), 0, "Should have no intermediate vault debt");
+
+        // Verify alice received her collateral payout (collateralForBorrower > 0 for mildly unhealthy)
+        assertGt(IERC20(collateral).balanceOf(alice), alicePreLiqBalance, "Alice should have received borrower payout");
+    }
+
+    // Regression test for deferred borrower payout: once a liquidation is pending settlement,
+    // a second liquidate() in the same EVC batch must revert instead of overwriting it.
+    function test_aave_liquidate_fails_secondLiquidation_sameBatch() public noGasMetering {
+        test_aave_setupLiquidationAccrueInterest(twyneLiqLTV);
+
+        // Avoid liquidation cooloff
+        vm.warp(block.timestamp + 12);
+
+        // Allow liquidator to submit the batch on behalf of eve for the second liquidation attempt.
+        vm.prank(eve);
+        evc.setAccountOperator(eve, liquidator, true);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.liquidate, ())
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: eve,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.liquidate, ())
+        });
+
+        vm.startPrank(liquidator);
+        vm.expectRevert(TwyneErrors.AlreadyLiquidated.selector);
+        evc.batch(items);
+        vm.stopPrank();
+
+        // The whole batch should revert, leaving the original borrower unchanged.
+        assertEq(alice_aave_vault.borrower(), alice, "Wrong collateral vault owner after reverted batch");
+    }
+
     // Test 6: liquidator who liquidates worthless collateral doesn't need to repay anything
     // TODO not sure how to handle this case, because if collateral value is insufficient, liquidating means you have to supply some collateral to make it healthy
     function test_aave_liquidate_worthless_collateral_accrue_interest() public noGasMetering {
         test_aave_setupLiquidationAccrueInterest(twyneLiqLTV);
-        address collateralAsset = address(aWETHWrapper);
         // skip this test with high safety buffers
-        if (twyneVaultManager.externalLiqBuffers(collateralAsset) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault)) < 0.975e4) {
             // make the collateral value worthless
 
             // If safety buffer is very high, set price with mockOracle
@@ -1128,7 +1275,7 @@ contract AaveLiquidationTest is AaveTestBase {
     function test_aave_liquidate_bad_evk_debt_accrue_interest() public noGasMetering {
         // Set max twyneLiqLTV value
         address collateralAsset = address(aWETHWrapper);
-        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(collateralAsset);
+        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(address(aaveEthVault));
         test_aave_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
@@ -1228,10 +1375,9 @@ contract AaveLiquidationTest is AaveTestBase {
     // Test F4: borrower who has LTV at the liquidation threshold cannot be liquidated (LTV must be worse than threshold)
     function test_aave_liquidate_fails_at_threshold_accrue_interest() public noGasMetering {
         test_aave_setupLiquidationAccrueInterest(twyneLiqLTV);
-        address collateralAsset = address(aWETHWrapper);
         // Skip this test with high safety buffers
         // Undo the process of putting the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(collateralAsset) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault)) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp - 600);  // reverse the accrual of 10 minutes of interest
 
@@ -1348,7 +1494,7 @@ contract AaveLiquidationTest is AaveTestBase {
         AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC
@@ -1620,7 +1766,7 @@ contract AaveLiquidationTest is AaveTestBase {
     function test_aave_liquidate_bad_evk_debt_safetybuffer() public noGasMetering {
         // Set max twyneLiqLTV value
         address collateralAsset = address(aWETHWrapper);
-        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(collateralAsset);
+        twyneLiqLTV = twyneVaultManager.maxTwyneLTVs(address(aaveEthVault));
         test_aave_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
@@ -1720,10 +1866,9 @@ contract AaveLiquidationTest is AaveTestBase {
     // Test F4: borrower who has LTV at the liquidation threshold cannot be liquidated (LTV must be worse than threshold)
     function test_aave_liquidate_fails_at_threshold_safetybuffer() public noGasMetering {
         test_aave_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
-        address collateralAsset = address(aWETHWrapper);
         // reverse the liquidation condition
         vm.startPrank(admin);
-        twyneVaultManager.setExternalLiqBuffer(collateralAsset, externalLiqBufferInitial);
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), externalLiqBufferInitial, 0);
         vm.stopPrank();
 
         vm.startPrank(alice);
@@ -1838,7 +1983,7 @@ contract AaveLiquidationTest is AaveTestBase {
         AaveV3CollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.AAVE_V3,
-                _asset: address(aWETHWrapper),
+                _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: USDC

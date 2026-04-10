@@ -50,14 +50,14 @@ contract AaveV3CollateralVault is CollateralVaultBase {
         _disableInitializers();
     }
 
-    /// @param __asset address of vault asset (AaveV3AToken wrapper shares)
+    /// @param __intermediateVault address of the intermediate vault
     /// @param __borrower address of vault owner
     /// @param __liqLTV user-specified target LTV
     /// @param __vaultManager VaultManager contract address
     /// @param __targetAsset Target asset to borrow
     /// @param __categoryId Category ID for e-mode on Aave
     function initialize(
-        IERC20 __asset,
+        address __intermediateVault,
         address __borrower,
         uint __liqLTV,
         VaultManager __vaultManager,
@@ -66,10 +66,11 @@ contract AaveV3CollateralVault is CollateralVaultBase {
     ) external initializer {
         // categoryId and underlyingAsset are used in _checkLiqLTV
         categoryId = __categoryId;
-        address _underlyingAsset = IAaveV3ATokenWrapper(address(__asset)).asset();
+        address __asset = IEVault(__intermediateVault).asset();
+        address _underlyingAsset = IAaveV3ATokenWrapper(__asset).asset();
         underlyingAsset = _underlyingAsset;
 
-        __CollateralVaultBase_init(__asset, __borrower, __liqLTV, __vaultManager);
+        __CollateralVaultBase_init(__intermediateVault, __borrower, __liqLTV, __vaultManager);
 
         (,,address debtToken) = aaveDataProvider.getReserveTokensAddresses(__targetAsset);
         targetAsset = __targetAsset;
@@ -77,13 +78,13 @@ contract AaveV3CollateralVault is CollateralVaultBase {
         aaveDebtToken = debtToken;
         SafeERC20.forceApprove(IERC20(__targetAsset), address(targetVault), type(uint).max); // necessary for repay()
         // necessary for depositUnderlying
-        SafeERC20.forceApprove(IERC20(_underlyingAsset), address(__asset), type(uint256).max);
+        SafeERC20.forceApprove(IERC20(_underlyingAsset), __asset, type(uint).max);
 
-        address _aToken = IAaveV3ATokenWrapper(address(__asset)).aToken();
+        address _aToken = IAaveV3ATokenWrapper(__asset).aToken();
         // necessary for wrapper.rebalanceATokens_CV()
-        SafeERC20.forceApprove(IERC20(_aToken), address(__asset), type(uint256).max);
+        SafeERC20.forceApprove(IERC20(_aToken), __asset, type(uint).max);
         aToken = _aToken;
-        tenPowAssetDecimals = 10 ** uint(IAaveV3ATokenWrapper(address(__asset)).decimals());
+        tenPowAssetDecimals = 10 ** uint(IAaveV3ATokenWrapper(__asset).decimals());
         tenPowVAssetDecimals = 10 ** uint(IERC20_Euler(aaveDebtToken).decimals());
         emit T_CollateralVaultInitialized();
     }
@@ -94,14 +95,14 @@ contract AaveV3CollateralVault is CollateralVaultBase {
 
     /// @dev increment the version for proxy upgrades
     function version() external override pure returns (uint) {
-        return 1;
+        return 2;
     }
 
     /// @notice Returns Aave's liquidation threshold for the underlying asset
     /// @dev For eMode (categoryId != 0): checks if asset is in collateral bitmap, returns eMode LT or reserve LT accordingly
     /// @dev For non-eMode (categoryId == 0): returns the reserve's liquidation threshold directly
     /// @return uint The liquidation threshold in 1e4 precision
-    function _getExtLiqLTV(address) internal view override returns (uint) {
+    function _getExtLiqLTV() internal view override returns (uint) {
         if (categoryId != 0) {
             // This is to ensure if emode is disabled we are taking correct liq ltv
             // Below code is taken from https://github.com/aave-dao/aave-v3-origin/blob/f53f03cf95ea5c3528016e849bf98210abdd5bcb/src/contracts/protocol/libraries/logic/GenericLogic.sol#L67
@@ -117,16 +118,6 @@ contract AaveV3CollateralVault is CollateralVaultBase {
         return currentLiquidationThreshold;
     }
 
-    /// @notice Validates that the provided liqLTV is within acceptable bounds for Aave
-    /// @dev Ensures: aaveLiqLTV * buffer <= liqLTV * MAXFACTOR && liqLTV <= maxLTV
-    /// @param _liqLTV The liquidation LTV to validate (in 1e4 precision)
-    /// @param _asset The collateral asset address (used to fetch buffer and maxLTV from VaultManager)
-    function _checkLiqLTV(uint _liqLTV, address _asset) internal view override {
-        uint buffer = uint(twyneVaultManager.externalLiqBuffers(_asset));
-        uint maxLTV = uint(twyneVaultManager.maxTwyneLTVs(_asset));
-        require(_getExtLiqLTV(address(0)) * buffer <= _liqLTV * MAXFACTOR && _liqLTV <= maxLTV, ValueOutOfRange());
-    }
-
     /// @notice returns the maximum assets that can be repaid to Aave
     function maxRepay() public view override returns (uint) {
         return IERC20(aaveDebtToken).balanceOf(address(this));
@@ -136,7 +127,8 @@ contract AaveV3CollateralVault is CollateralVaultBase {
     function _handleExcessCredit(uint __invariantCollateralAmount) internal override {
         uint vaultAssets = totalAssetsDepositedOrReserved;
         if (vaultAssets > __invariantCollateralAmount) {
-            vaultAssets -= intermediateVault.repay(vaultAssets - __invariantCollateralAmount, address(this));
+            uint excess = Math.min(vaultAssets - __invariantCollateralAmount, intermediateVault.debtOf(address(this)));
+            vaultAssets -= intermediateVault.repay(excess, address(this));
         } else if (vaultAssets < __invariantCollateralAmount) {
             vaultAssets += intermediateVault.borrow(__invariantCollateralAmount - vaultAssets, address(this));
         }
@@ -148,10 +140,11 @@ contract AaveV3CollateralVault is CollateralVaultBase {
     /// @notice Calculates the collateral assets that should be held by the collateral vault to comply with invariants
     /// @return uint Returns the amount of collateral assets that the collateral vault should hold with zero excess credit
     function _invariantCollateralAmount() internal view override returns (uint) {
-        uint userCollateral = totalAssetsDepositedOrReserved - maxRelease();
-
-        uint liqLTV_external = _getExtLiqLTV(address(0)) * uint(twyneVaultManager.externalLiqBuffers(asset())); // 1e8 precision
-        return Math.ceilDiv(userCollateral * twyneLiqLTV * MAXFACTOR, liqLTV_external);
+        // adjExtLiqLTV = β_safe · λ̃_e (1e8 precision)
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault))) * _getExtLiqLTV();
+        // When dynamic leg is selected: ceilDiv(adjExtLiqLTV * X, adjExtLiqLTV) = X (exact, no rounding)
+        // When chosen leg is selected: rounds up, which is conservative (reserves more collateral)
+        return Math.ceilDiv(_collateralScaledByLiqLTV1e8(true, adjExtLiqLTV), adjExtLiqLTV);
     }
 
     /// @dev collateral vault borrows targetAsset from underlying protocol.
@@ -175,7 +168,7 @@ contract AaveV3CollateralVault is CollateralVaultBase {
     }
 
     /// @notice Deposits underlying collateral (like WETH)
-    function _depositUnderlying(uint underlying) internal virtual override returns (uint){
+    function _depositUnderlying(uint underlying) internal virtual override returns (uint) {
         IAaveV3ATokenWrapper __asset = IAaveV3ATokenWrapper(asset());
         SafeERC20Lib.safeTransferFrom(IERC20_Euler(underlyingAsset), borrower, address(this), underlying, permit2);
         return __asset.deposit(underlying, address(this));
@@ -196,22 +189,24 @@ contract AaveV3CollateralVault is CollateralVaultBase {
 
     /// @notice Checks if this vault can be liquidated on Twyne
     /// @dev Two liquidation scenarios:
-    /// @dev 1. Aave health factor is close to liquidation (hf * buffer < 1e18 * MAXFACTOR)
-    /// @dev 2. Twyne LTV exceeded (totalDebt * MAXFACTOR > twyneLiqLTV * userCollateralValue)
+    /// @dev 1. Aave health factor is close to liquidation (hf * buffer < 1)
+    /// @dev 2. Twyne LTV exceeded (totalDebt > C · λ̃_t)
     /// @return bool True if the vault can be liquidated
     function _canLiquidate() internal view virtual override returns (bool) {
         IAaveV3ATokenWrapper __asset = IAaveV3ATokenWrapper(asset());
         (, uint totalDebtBase,,,,uint hf) = IAaveV3Pool(targetVault).getUserAccountData(address(this));
 
+        uint buffer = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault)));
         // Check external protocol liquidation condition (with overflow protection for hf)
-        if (hf <= type(uint).max / MAXFACTOR &&
-            uint(twyneVaultManager.externalLiqBuffers(address(__asset))) * hf < 1e18 * MAXFACTOR) {
+        if (hf <= type(uint).max / MAXFACTOR && buffer * hf < 1e18 * MAXFACTOR) {
             return true;
         }
 
-        uint userCollateralValue =
-            (totalAssetsDepositedOrReserved - maxRelease()) * uint(__asset.latestAnswer()) / tenPowAssetDecimals;
-        return (totalDebtBase * MAXFACTOR > twyneLiqLTV * userCollateralValue);
+        // C · λ̃_t converted to value (USD base units, 1e8 precision on LTV)
+        uint adjExtLiqLTV = buffer * _getExtLiqLTV();
+        uint collateralValueScaledByLiqLTV =
+            _collateralScaledByLiqLTV1e8(false, adjExtLiqLTV) * uint(__asset.latestAnswer()) / tenPowAssetDecimals;
+        return (totalDebtBase * MAXFACTOR * MAXFACTOR > collateralValueScaledByLiqLTV);
     }
 
     /// @notice Converts collateral value from USD to native collateral asset units
@@ -226,9 +221,10 @@ contract AaveV3CollateralVault is CollateralVaultBase {
 
     function balanceOf(address user) external view nonReentrantView override returns (uint) {
         if (user != address(this)) return 0;
-        if (borrower == address(0)) return 0;
 
         uint _totalAssetsDepositedOrReserved = totalAssetsDepositedOrReserved;
+        // return 0 when this vault doesn't have any assets
+        if (_totalAssetsDepositedOrReserved == 0) return 0;
         // return 0 if externally liquidated
 
         if (_totalAssetsDepositedOrReserved > IAToken(aToken).scaledBalanceOf(address(this))) return 0;
@@ -277,7 +273,7 @@ contract AaveV3CollateralVault is CollateralVaultBase {
 
         // Convert _maxRepay / maxTwyneLTV to USD
         // Result is in USD with Chainlink decimals for target asset
-        uint userCollateral = targetAssetPrice * (_maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(address(__asset)))
+        uint userCollateral = targetAssetPrice * (_maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(address(intermediateVault)))
             / tenPowVAssetDecimals;
 
         // Convert from USD to collateral asset units
@@ -297,8 +293,7 @@ contract AaveV3CollateralVault is CollateralVaultBase {
 
         // Step 3: Split userCollateral between borrower and liquidator using dynamic incentive
         // Convert userCollateral to USD for collateralForBorrower calculation
-        uint C_new =
-            userCollateral * uint(__asset.latestAnswer()) / tenPowAssetDecimals;
+        uint C_new = userCollateral * uint(__asset.latestAnswer()) / tenPowAssetDecimals;
 
         (, uint B,,,,) = IAaveV3Pool(targetVault).getUserAccountData(address(this));
 
@@ -348,7 +343,7 @@ contract AaveV3CollateralVault is CollateralVaultBase {
         // as redeem may fail if the wrapper doesn't have enough aTokens.
         __asset.rebalanceATokens_CV(0);
 
-        if (liquidatorReward > 0){
+        if (liquidatorReward > 0) {
             // step 2: transfer collateral reward to liquidator.
             // We transfer atokens instead of underlying token (like USDC)
             // to avoid revert during high utilization on Aave.
@@ -379,7 +374,8 @@ contract AaveV3CollateralVault is CollateralVaultBase {
     /// @notice This is to claim rewards accrued to this collateral vault because of atoken balance to vault manager
     /// @param assets address of tokens for which reward is to be claimed
     function claimRewards(address[] memory assets) external {
-        INCENTIVES_CONTROLLER.claimAllRewards(assets, address(twyneVaultManager));
+        (bool ok,) = address(INCENTIVES_CONTROLLER).call(abi.encodeCall(IRewardsController.claimAllRewards, (assets, address(twyneVaultManager))));
+        require(ok);
     }
 
 }

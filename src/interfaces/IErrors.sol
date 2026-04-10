@@ -26,10 +26,12 @@ interface IErrors {
     error T_CV_OperationDisabled(); // 0x335c5fec
     error T_OperationDisabled(); // 0x4f6309cb
     error ValueOutOfRange(); // 0x4eb4f9fb
+    error AlreadyLiquidated(); // 0xc466f957
     error VaultStatusLiquidatable(); // 0x9c166fd0
     error ViolatorNotCollateralVault(); // 0x6af6f6bb
     error CallerNotCollateralVault(); // 0xaff5551d
     error T_WithdrawMoreThanMax(); // 0x2755faea
+    error CallerNotOwnerOrPauseGuardian(); // 0x384b6fd5
 
     // LeverageOperator errors
     error T_CallerNotBorrower(); // 0xf74e1da2

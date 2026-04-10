@@ -33,7 +33,7 @@ contract EulerFrontendTests is EulerTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, eulerWETH, eulerUSDC, twyneLiqLTV, address(0)))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV, address(0)))
         });
         vm.startPrank(alice);
         (IEVC.BatchItemResult[] memory batchItemsResult,,) = evc.batchSimulation(items);
@@ -66,7 +66,7 @@ contract EulerFrontendTests is EulerTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, eulerWETH, eulerUSDC, twyneLiqLTV, address(0)))
+            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV, address(0)))
         });
         // Perform Permit2 on the collateral vault
         items[1] = IEVC.BatchItem({
@@ -378,7 +378,7 @@ contract EulerFrontendTests is EulerTestBase {
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -426,7 +426,7 @@ contract EulerFrontendTests is EulerTestBase {
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)

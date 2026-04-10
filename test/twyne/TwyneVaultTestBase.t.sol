@@ -26,8 +26,6 @@ import {MockPriceOracle} from "euler-vault-kit/../test/mocks/MockPriceOracle.sol
 import {SequenceRegistry} from "euler-vault-kit/SequenceRegistry/SequenceRegistry.sol";
 import {AssertionsCustomTypes} from "euler-vault-kit/../test/helpers/AssertionsCustomTypes.sol";
 import "euler-vault-kit/EVault/shared/Constants.sol";
-import {RiskManagerModule} from "euler-vault-kit/EVault/modules/RiskManager.sol";
-import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
@@ -79,7 +77,7 @@ abstract contract TwyneVaultTestBase is AssertionsCustomTypes, TwyneStorage, Tes
         riskManagerModule = address(new RiskManager(integrations));
         balanceForwarderModule = address(new BalanceForwarder(integrations));
         governanceModule = address(new Governance(integrations));
-        vm.label(address(riskManagerModule), "CreditRiskManager");
+        vm.label(address(riskManagerModule), "RiskManager");
         modules = Dispatch.DeployedModules({
             initialize: initializeModule,
             token: tokenModule,

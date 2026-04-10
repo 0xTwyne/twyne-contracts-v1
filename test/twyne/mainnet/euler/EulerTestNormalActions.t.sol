@@ -7,6 +7,8 @@ import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {ReferenceEulerWrapper} from "test/mocks/ReferenceEulerWrapper.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
+import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
+import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 
 contract EulerTestNormalActions is EulerTestBase {
     function setUp() public virtual override {
@@ -157,6 +159,44 @@ contract EulerTestNormalActions is EulerTestBase {
         e_evcCanCreateCollateralVault(collateralAssets);
     }
 
+    function test_e_setIntermediateVaultFalse() public {
+        e_creditDeposit(eulerWETH);
+        assertTrue(twyneVaultManager.isIntermediateVault(address(eeWETH_intermediate_vault)));
+
+        // unregister
+        vm.prank(admin);
+        twyneVaultManager.setIntermediateVault(eeWETH_intermediate_vault, false);
+        assertFalse(twyneVaultManager.isIntermediateVault(address(eeWETH_intermediate_vault)));
+
+        // creating a collateral vault should revert
+        vm.startPrank(alice);
+        vm.expectRevert(TwyneErrors.IntermediateVaultNotSet.selector);
+        collateralVaultFactory.createCollateralVault({
+            _vaultType: VaultType.EULER_V2,
+            _intermediateVault: intermediateVaultFor[eulerWETH],
+            _targetVault: eulerUSDC,
+            _liqLTV: twyneLiqLTV,
+            _targetAsset: address(0)
+        });
+        vm.stopPrank();
+
+        // re-register
+        vm.prank(admin);
+        twyneVaultManager.setIntermediateVault(eeWETH_intermediate_vault, true);
+        assertTrue(twyneVaultManager.isIntermediateVault(address(eeWETH_intermediate_vault)));
+
+        // creating a collateral vault should succeed after re-register
+        vm.prank(alice);
+        address vault = collateralVaultFactory.createCollateralVault({
+            _vaultType: VaultType.EULER_V2,
+            _intermediateVault: intermediateVaultFor[eulerWETH],
+            _targetVault: eulerUSDC,
+            _liqLTV: twyneLiqLTV,
+            _targetAsset: address(0)
+        });
+        assertTrue(vault != address(0));
+    }
+
     // Test that if time passes, the balance of aTokens in the collateral vault increases and the user can withdraw all
     function test_e_withdrawCollateralAfterWarp() public noGasMetering {
         e_withdrawCollateralAfterWarp(eulerWETH, 1000);
@@ -276,10 +316,10 @@ contract EulerTestNormalActions is EulerTestBase {
 
     function test_e_IRMTwyneCurve_nonLinearPoint() public noGasMetering {
         IRMTwyneCurve irm = new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0,
+            linearParameter_: 750,
+            polynomialParameter_: 49250,
+            nonlinearPoint_: 5e17
         });
 
         uint utilization = irm.nonlinearPoint() - 1;
@@ -316,6 +356,41 @@ contract EulerTestNormalActions is EulerTestBase {
         assertEq(ir, ir_expected);
     }
 
+    function test_e_IRMTwyneCurve_minInterest() public noGasMetering {
+        // minInterest = 100 (1% base rate), linearParameter = 750, polynomialParameter = 49250
+        IRMTwyneCurve irm = new IRMTwyneCurve(100, 750, 49250, 5e17);
+
+        uint SECONDS_PER_YEAR = 365.2425 * 86400;
+        uint totalAssets = 1e36;
+
+        // Test at 0% utilization - should return minInterest only
+        uint ir = irm.computeInterestRateView(address(0), totalAssets, 0);
+        uint expectedIr = (100 * 1e18 * (1e9 / MAXFACTOR)) / SECONDS_PER_YEAR;
+        assertEq(ir, expectedIr, "Interest rate at 0% utilization should equal minInterest");
+
+        // Test at 50% utilization (at nonlinearPoint) - should return minInterest + linear term only
+        uint borrows = 5e17 * totalAssets / 1e18;
+        ir = irm.computeInterestRateView(address(0), totalAssets - borrows, borrows);
+        expectedIr = ((100 * 1e18 + 750 * 5e17) * (1e9 / MAXFACTOR)) / SECONDS_PER_YEAR;
+        assertEq(ir, expectedIr, "Interest rate at 50% utilization incorrect");
+
+        // Test at 80% utilization (above nonlinearPoint) - should include polynomial term
+        borrows = 8e17 * totalAssets / 1e18;
+        ir = irm.computeInterestRateView(address(0), totalAssets - borrows, borrows);
+
+        // Calculate polynomial term for 80% utilization
+        uint utilpow = _computeUtilPow12(8e17);
+        expectedIr = ((100 * 1e18 + 750 * 8e17 + 49250 * utilpow) * (1e9 / MAXFACTOR)) / SECONDS_PER_YEAR;
+        assertEq(ir, expectedIr, "Interest rate at 80% utilization incorrect");
+    }
+
+    function _computeUtilPow12(uint utilization) internal pure returns (uint utilpow) {
+        uint utilTemp4 = (utilization * utilization) / 1e18;
+        utilTemp4 = (utilTemp4 * utilTemp4) / 1e18;
+        utilpow = (utilTemp4 * utilTemp4) / 1e18;
+        utilpow = (utilpow * utilTemp4) / 1e18;
+    }
+
     function testFuzz_e_IRMTwyneCurve(uint64 _utilization) public noGasMetering {
         // Note: only do differential fuzzing if DIFFERENTIAL_FUZZ = 1 in .env file
         // User must manually set "ffi = true" in foundry.toml for this to work
@@ -324,10 +399,10 @@ contract EulerTestNormalActions is EulerTestBase {
             vm.assume(_utilization <= 1e18);
             uint utilization = uint(_utilization);
             IRMTwyneCurve irm = new IRMTwyneCurve({
-                idealKinkInterestRate_: 600, // 6%
-                linearKinkUtilizationRate_: 8000, // 80%
-                maxInterestRate_: 50000, // 500%
-                nonlinearPoint_: 5e17 // 50%
+                minInterest_: 0,
+                linearParameter_: 750,
+                polynomialParameter_: 49250,
+                nonlinearPoint_: 5e17
             });
 
             uint totalAssets = 1e36;
@@ -381,7 +456,7 @@ contract EulerTestNormalActions is EulerTestBase {
         ReferenceEulerWrapper referenceWrapper = new ReferenceEulerWrapper(address(evc), WETH);
 
         address collateralAsset = eulerWETH;
-        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAsset));
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
 
         deal(WETH, alice, amount); // Give enough for both tests
 
@@ -445,7 +520,7 @@ contract EulerTestNormalActions is EulerTestBase {
 
         // Use existing eulerWETH as collateral and get intermediate vault
         address collateralAsset = eulerWETH;
-        IEVault intermediateVault = IEVault(twyneVaultManager.getIntermediateVault(collateralAsset));
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
 
         // Give alice enough ETH for both tests
         deal(alice, amount); // Give enough ETH for both tests

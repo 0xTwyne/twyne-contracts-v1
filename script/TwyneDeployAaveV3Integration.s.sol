@@ -20,7 +20,6 @@ import {AaveV3CollateralVault} from "src/twyne/AaveV3CollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {Address} from "openzeppelin-contracts/utils/Address.sol";
-import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {AaveV3LeverageOperator} from "src/operators/AaveV3LeverageOperator.sol";
 import {AaveV3Wrapper} from "src/Periphery/AaveV3Wrapper.sol";
 import {AaveV3TeleportOperator} from "src/operators/AaveV3TeleportOperator.sol";
@@ -77,13 +76,10 @@ contract TwyneDeployAaveV3Integration is BatchScript {
 
     CollateralVaultFactory collateralVaultFactory;
     VaultManager vaultManager;
-    EulerRouter oracleRouter;
     EulerRouter aaveOracleRouter;
     GenericFactory factory;
     IEVault eaWSTETH_intermediate_vault;
     AaveV3CollateralVault deployer_collateral_vault;
-    HealthStatViewer healthViewer;
-
     AaveV3ATokenWrapperOracle aTokenWrapperOracle;
 
     address bridgeHook;
@@ -149,7 +145,6 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         collateralVaultFactory = CollateralVaultFactory(vm.parseJsonAddress(twyneAddressesJson, ".collateralVaultFactory"));
         evc = payable(collateralVaultFactory.EVC());
         vaultManager = VaultManager(payable(vm.parseJsonAddress(twyneAddressesJson, ".vaultManager")));
-        oracleRouter = EulerRouter(vm.parseJsonAddress(twyneAddressesJson, ".oracleRouter"));
         factory = GenericFactory(vm.parseJsonAddress(twyneAddressesJson, ".GenericFactory"));
         IEVault intermediateVault = IEVault(vm.parseJsonAddress(twyneAddressesJson, ".intermediateVault"));
         (bridgeHook,) = intermediateVault.hookConfig();
@@ -195,7 +190,7 @@ contract TwyneDeployAaveV3Integration is BatchScript {
 
         finalJson = vm.serializeAddress(
             deploymentJson,
-            "upgrBeacon",
+            "upgradeableBeacon",
             upgradeableBeacon
         );
         log("Upgradeable beacon", upgradeableBeacon);
@@ -269,16 +264,6 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         );
         log("AaveV3TeleportOperator", address(aaveV3TeleportOperator));
 
-        // Deploy HealthStatViewer
-        healthViewer = new HealthStatViewer(aavePool);
-        vm.label(address(healthViewer), "HealthStatViewer");
-        finalJson = vm.serializeAddress(
-            deploymentJson,
-            "healthStatViewer",
-            address(healthViewer)
-        );
-        log("HealthStatViewer", address(healthViewer));
-
         // deploy aave oracle router :check
         // Deploy aave wrapper oracle :check
         // Deploy aave collateral vault impl :check
@@ -315,8 +300,12 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         require(new_vaultAddress != address(0), "Missing intermediateVault in phase0 json");
         eaWSTETH_intermediate_vault = IEVault(new_vaultAddress);
 
+        // Ensure emergency pause guardian is set to the current owner multisig.
+        bytes memory collateralFactoryCall = abi.encodeCall(collateralVaultFactory.setPauseGuardian, (collateralVaultFactory.owner()));
+        addToBatch(address(collateralVaultFactory), collateralFactoryCall);
+
         // setBeacon on collateral factory
-        bytes memory collateralFactoryCall = abi.encodeCall(collateralVaultFactory.setBeacon, (aavePool, upgradeableBeacon));
+        collateralFactoryCall = abi.encodeCall(collateralVaultFactory.setBeacon, (aavePool, upgradeableBeacon));
         addToBatch(address(collateralVaultFactory), collateralFactoryCall);
 
 
@@ -330,7 +319,7 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set intermediate vault the new intermediate vault deployed
-        vaultManagerCall = abi.encodeCall(vaultManager.setIntermediateVault, (eaWSTETH_intermediate_vault));
+        vaultManagerCall = abi.encodeCall(vaultManager.setIntermediateVault, (eaWSTETH_intermediate_vault, true));
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set oracle resolved true for new vault
@@ -338,11 +327,17 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set external liq buffer
-        vaultManagerCall = abi.encodeCall(vaultManager.setExternalLiqBuffer, (address(aWSTETHWrapper), 1e4));
+        vaultManagerCall = abi.encodeCall(
+            vaultManager.setExternalLiqBuffer,
+            (address(eaWSTETH_intermediate_vault), 1e4, 0)
+        );
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set max liq ltv
-        vaultManagerCall = abi.encodeCall(vaultManager.setMaxLiquidationLTV, (address(aWSTETHWrapper), 0.98e4));
+        vaultManagerCall = abi.encodeCall(
+            vaultManager.setMaxLiquidationLTV,
+            (address(eaWSTETH_intermediate_vault), 0.98e4, 0)
+        );
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Check decimals for target and collateral asset
@@ -391,12 +386,11 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(bridgeHook, OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
-        // Base=0.00% APY,  Kink(900.00% utilization)=0.50% APY  Max=2.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurveGamma32({
-            idealKinkInterestRate_: 5e1, // 0.5%
-            linearKinkUtilizationRate_: 9e3, //900%
-            maxInterestRate_: 2e2, // 2%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0, // 0
+            linearParameter_: 55, // 0.0055
+            polynomialParameter_: 144, // 0.0144
+            nonlinearPoint_: 5e17 // 0.5
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);

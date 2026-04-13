@@ -44,6 +44,8 @@ contract TwyneAddVaultPair is BatchScript {
     address SAFE;
 
     uint16 supplyCap;
+    // TODO Set this to the address of an existing intermediate vault if reusing one, or address(0) to create a new one
+    address existingIntermediateVault;
 
     error UnknownProfile();
     error InvalidCollateral();
@@ -114,13 +116,14 @@ contract TwyneAddVaultPair is BatchScript {
 
         vm.startBroadcast(deployer);
 
-        // 1. Deploy new intermediate vault for the collateral asset
+        // 1. Deploy new intermediate vault for the collateral asset or reuse existing one
         IEVault new_intermediate_vault;
-        // if intermediate vault already exists, use it. Otherwise, create a new one.
-        try twyneVaultManager.getIntermediateVault(_collateralAsset) returns (address vault) {
-            new_intermediate_vault = IEVault(vault);
-        // if revert encountered because the vault does not exist, create new intermediate vault
-        } catch {
+        if (existingIntermediateVault != address(0)) {
+            // Reuse an existing intermediate vault
+            require(twyneVaultManager.isIntermediateVault(existingIntermediateVault), "Provided address is not a registered intermediate vault");
+            new_intermediate_vault = IEVault(existingIntermediateVault);
+        } else {
+            // Create a new intermediate vault
             new_intermediate_vault = newIntermediateVault(_collateralAsset, address(oracleRouter), USD);
         }
 
@@ -181,15 +184,11 @@ contract TwyneAddVaultPair is BatchScript {
         address newBeacon = abi.decode(vm.parseJson(json, ".newUpgrBeacon"), (address));
         address crossAdapterOracle = abi.decode(vm.parseJson(json, ".crossAdapterOracle"), (address));
 
-        // Get the intermediate vault that should have been created in phase 0
+        // Get the intermediate vault that was created/specified in phase 0
         IEVault new_intermediate_vault;
-        bool newVaultCreated = false;
         new_intermediate_vault = IEVault(abi.decode(vm.parseJson(json, ".intermediateVault"), (address)));
-        try twyneVaultManager.getIntermediateVault(_collateralAsset) returns (address vault) {
-            require(new_intermediate_vault == IEVault(vault), "intermediate vault address mismatch");
-        } catch {
-            newVaultCreated = true;
-        }
+        // If the vault is not yet registered as an intermediate vault, it was newly created in phase 0
+        bool newVaultCreated = !twyneVaultManager.isIntermediateVault(address(new_intermediate_vault));
 
         require(address(new_intermediate_vault) != address(0), "intermediate vault shouldn't be address(0)");
 
@@ -200,25 +199,24 @@ contract TwyneAddVaultPair is BatchScript {
     }
 
     function phase2(address _collateralAddress, address _targetAsset) internal {
+        // Read deployment data from phase 0 to get the intermediate vault address
+        string memory collateralSymbol = IEVault(_collateralAddress).symbol();
+        string memory targetSymbol = IEVault(_targetAsset).symbol();
+        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), "_", collateralSymbol, "_", targetSymbol, ".json");
+        string memory existingJson = vm.readFile(fileName);
+        address intermediateVaultAddr = abi.decode(vm.parseJson(existingJson, ".intermediateVault"), (address));
+
         vm.startBroadcast(deployer);
         EulerCollateralVault deployer_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: _collateralAddress,
+                _intermediateVault: intermediateVaultAddr,
                 _targetVault: _targetAsset,
                 _liqLTV: 0.97e4,
                 _targetAsset: IEVault(_targetAsset).asset()
             })
         );
         vm.stopBroadcast();
-
-        // claude: write deployer_collateral_vault to our json file
-        string memory collateralSymbol = IEVault(_collateralAddress).symbol();
-        string memory targetSymbol = IEVault(_targetAsset).symbol();
-        string memory fileName = string.concat("VaultPairDeploymentPhase0_", vm.toString(block.chainid), "_", collateralSymbol, "_", targetSymbol, ".json");
-
-        // Read existing deployment data and parse it
-        string memory existingJson = vm.readFile(fileName);
 
         // Re-serialize all existing data plus the new deployer_collateral_vault
         string memory deploymentJson = "deployment";
@@ -252,13 +250,10 @@ contract TwyneAddVaultPair is BatchScript {
         address newBeacon = abi.decode(vm.parseJson(json, ".newUpgrBeacon"), (address));
         // address crossAdapterOracle = abi.decode(vm.parseJson(json, ".crossAdapterOracle"), (address));
 
-        // Get the intermediate vault that should have been created in phase 0
+        // Get the intermediate vault from the phase 0 deployment data
         IEVault new_intermediate_vault;
-        try twyneVaultManager.getIntermediateVault(_collateralAsset) returns (address vault) {
-            new_intermediate_vault = IEVault(vault);
-        } catch {
-            revert("Intermediate vault not found. Run phase 0 first.");
-        }
+        new_intermediate_vault = IEVault(abi.decode(vm.parseJson(json, ".intermediateVault"), (address)));
+        require(twyneVaultManager.isIntermediateVault(address(new_intermediate_vault)), "Intermediate vault not registered. Run phase 1 first.");
 
         // Confirm owners are all set to the proper values
         require(collateralVaultFactory.owner() == SAFE); // do a couple sanity checks that SAFE env address is correct
@@ -275,12 +270,11 @@ contract TwyneAddVaultPair is BatchScript {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
-        // Base=0.00% APY,  Kink(80.00%)=20.00% APY  Max=120.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
-            idealKinkInterestRate_: 0, // 0%
-            linearKinkUtilizationRate_: 9e3, // 90%
-            maxInterestRate_: 2e3, // 20%
-            nonlinearPoint_: 1e17 // 10%
+            minInterest_: 0, // 0
+            linearParameter_: 0, // 0
+            polynomialParameter_: 2e3, // 0.2
+            nonlinearPoint_: 1e17 // 0.1
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
@@ -305,7 +299,7 @@ contract TwyneAddVaultPair is BatchScript {
 
             bytes memory setIntermediateVaultTxn = abi.encodeCall(
                 VaultManager.setIntermediateVault,
-                (IEVault(new_vault))
+                (IEVault(new_vault), true)
             );
             addToBatch(address(twyneVaultManager), 0, setIntermediateVaultTxn);
 
@@ -326,13 +320,13 @@ contract TwyneAddVaultPair is BatchScript {
 
             bytes memory setMaxLiquidationLTVTxn = abi.encodeCall(
                 VaultManager.setMaxLiquidationLTV,
-                (_collateralAsset, 0.98e4)
+                (address(new_vault), 0.98e4, 0)
             );
             addToBatch(address(twyneVaultManager), 0, setMaxLiquidationLTVTxn);
 
             bytes memory setExternalLiqBufferTxn = abi.encodeCall(
                 VaultManager.setExternalLiqBuffer,
-                (_collateralAsset, 0.99e4)
+                (address(new_vault), 0.99e4, 0)
             );
             addToBatch(address(twyneVaultManager), 0, setExternalLiqBufferTxn);
         }

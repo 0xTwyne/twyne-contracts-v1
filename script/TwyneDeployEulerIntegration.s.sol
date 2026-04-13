@@ -32,7 +32,6 @@ import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {Address} from "openzeppelin-contracts/utils/Address.sol";
-import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
 
@@ -79,7 +78,6 @@ contract TwyneDeployEulerIntegration is Script {
     GenericFactory factory;
     IEVault eeWETH_intermediate_vault;
     EulerCollateralVault deployer_collateral_vault;
-    HealthStatViewer healthViewer;
     LeverageOperator leverageOperator;
 
     address deployer;
@@ -98,7 +96,6 @@ contract TwyneDeployEulerIntegration is Script {
         address intermediateVault;
         address upgrBeacon;
         address deployerExampleCollateralVault;
-        address healthStatViewer;
         address leverageOperator;
         address eulerWrapper;
     }
@@ -176,7 +173,6 @@ contract TwyneDeployEulerIntegration is Script {
         result = vm.serializeAddress("twyneAddresses", "intermediateVault", Addresses.intermediateVault);
         result = vm.serializeAddress("twyneAddresses", "upgrBeacon", Addresses.upgrBeacon);
         result = vm.serializeAddress("twyneAddresses", "deployerExampleCollateralVault", Addresses.deployerExampleCollateralVault);
-        result = vm.serializeAddress("twyneAddresses", "healthStatViewer", Addresses.healthStatViewer);
         result = vm.serializeAddress("twyneAddresses", "leverageOperator", Addresses.leverageOperator);
         result = vm.serializeAddress("twyneAddresses", "eulerWrapper", Addresses.eulerWrapper);
     }
@@ -188,12 +184,11 @@ contract TwyneDeployEulerIntegration is Script {
         // set test values, these are placeholders for testing
         // set hook so all borrows and flashloans to use the bridge
         new_vault.setHookConfig(address(new BridgeHookTarget(address(collateralVaultFactory))), OP_BORROW | OP_LIQUIDATE | OP_FLASHLOAN | OP_PULL_DEBT);
-        // Base=0.00% APY,  Kink(80.00% utilization)=6.00% APY  Max=500.00% APY
         new_vault.setInterestRateModel(address(new IRMTwyneCurve({
-            idealKinkInterestRate_: 600, // 6%
-            linearKinkUtilizationRate_: 8000, // 80%
-            maxInterestRate_: 50000, // 500%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0, // 0
+            linearParameter_: 750, // 0.075
+            polynomialParameter_: 49250, // 4.925
+            nonlinearPoint_: 5e17 // 0.5
         })));
         new_vault.setMaxLiquidationDiscount(0.2e4);
         new_vault.setLiquidationCoolOffTime(1);
@@ -206,7 +201,7 @@ contract TwyneDeployEulerIntegration is Script {
         address eulerExternalOracle = EulerRouter(IEVault(_asset).oracle()).getConfiguredOracle(IEVault(_asset).asset(), USD);
         assert(keccak256(abi.encodePacked(EulerRouter(eulerExternalOracle).name())) == keccak256(abi.encodePacked("ChainlinkOracle")) || keccak256(abi.encodePacked(EulerRouter(eulerExternalOracle).name())) == keccak256(abi.encodePacked("CrossAdapter")));
         vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_asset).asset(), USD, eulerExternalOracle)));
-        vaultManager.setIntermediateVault(new_vault);
+        vaultManager.setIntermediateVault(new_vault, true);
         new_vault.setGovernorAdmin(address(vaultManager));
 
         require(new_vault.configFlags() & CFG_DONT_SOCIALIZE_DEBT == 0, "debt will not be socialized");
@@ -297,6 +292,7 @@ contract TwyneDeployEulerIntegration is Script {
         // Deploy CollateralVaultFactory proxy
         ERC1967Proxy factoryProxy = new ERC1967Proxy(address(factoryImpl), factoryInitData);
         collateralVaultFactory = CollateralVaultFactory(payable(address(factoryProxy)));
+        collateralVaultFactory.setPauseGuardian(collateralVaultFactory.owner());
 
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
 
@@ -313,9 +309,6 @@ contract TwyneDeployEulerIntegration is Script {
         vm.label(address(vaultManager), "vaultManager");
 
         eulerCollateralVaultImpl = address(new EulerCollateralVault(address(evc), eulerUSDC));
-
-        healthViewer = new HealthStatViewer(aavePool);
-        vm.label(address(healthViewer), "healthViewer");
 
         // Deploy LeverageOperator
         leverageOperator = new LeverageOperator(
@@ -338,12 +331,12 @@ contract TwyneDeployEulerIntegration is Script {
         collateralVaultFactory.setVaultManager(address(vaultManager));
 
         vaultManager.setOracleRouter(address(oracleRouter));
-        vaultManager.setMaxLiquidationLTV(eulerWETH, 0.94e4);
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newIntermediateVault(eulerWETH, address(oracleRouter), USD);
 
-        vaultManager.setExternalLiqBuffer(eulerWETH, 1e4);
+        vaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 0.94e4, 0);
+        vaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 1e4, 0);
         require(IEVault(eulerUSDC).LTVBorrow(eeWETH_intermediate_vault.asset()) != 0, InvalidCollateral());
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
@@ -367,7 +360,7 @@ contract TwyneDeployEulerIntegration is Script {
         deployer_collateral_vault = EulerCollateralVault(
             collateralVaultFactory.createCollateralVault({
                 _vaultType: VaultType.EULER_V2,
-                _asset: eulerWETH,
+                _intermediateVault: address(eeWETH_intermediate_vault),
                 _targetVault: eulerUSDC,
                 _liqLTV: twyneLiqLTV,
                 _targetAsset: address(0)
@@ -383,7 +376,6 @@ contract TwyneDeployEulerIntegration is Script {
         log("eeWETH_intermediate_vault", address(eeWETH_intermediate_vault));
         log("upgradeable beacon", address(upgradeableBeacon));
         log("deployer_collateral_vault", address(deployer_collateral_vault));
-        log("healthViewer", address(healthViewer));
         log("leverageOperator", address(leverageOperator));
         log("eulerWrapper", address(eulerWrapper));
 
@@ -396,7 +388,6 @@ contract TwyneDeployEulerIntegration is Script {
         twyneAddresses.intermediateVault = address(eeWETH_intermediate_vault);
         twyneAddresses.upgrBeacon = address(upgradeableBeacon);
         twyneAddresses.deployerExampleCollateralVault = address(deployer_collateral_vault);
-        twyneAddresses.healthStatViewer = address(healthViewer);
         twyneAddresses.leverageOperator = address(leverageOperator);
         twyneAddresses.eulerWrapper = address(eulerWrapper);
         string memory serializedTwyneAddresses = serializeTwyneAddresses(twyneAddresses);

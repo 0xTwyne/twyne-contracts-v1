@@ -64,6 +64,7 @@ contract TwyneAdminTransfer is Script {
         // Set production deployment owner
         vm.startBroadcast(deployer);
         factory.setUpgradeAdmin(admin);
+        collateralVaultFactory.setPauseGuardian(admin);
         collateralVaultFactory.transferOwnership(admin);
         vaultManager.doCall(address(intermediateVault), 0, abi.encodeCall(intermediateVault.setFeeReceiver, admin));
 
@@ -77,6 +78,7 @@ contract TwyneAdminTransfer is Script {
         // Verify the end state matches expectations
         require(factory.upgradeAdmin() == admin, "factory needs to be set to correct admin");
         require(collateralVaultFactory.owner() == admin, "collateralVaultFactory needs to be set to correct admin");
+        require(collateralVaultFactory.pauseGuardian() == admin, "collateralVaultFactory pauseGuardian needs to be set to correct admin");
         require(oracleRouter.governor() == address(vaultManager), "oracleRouter needs to be set to correct admin");
         require(vaultManager.owner() == admin, "vaultManager needs to be set to correct admin");
         require(intermediateVault.feeReceiver() == admin, "intermediateVault needs to be set to correct admin");

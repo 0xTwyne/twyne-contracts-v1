@@ -109,7 +109,7 @@ contract TwyneUpgradeBeacon is BatchScript {
             uint256 implVersion = EulerCollateralVault(currentImpl).version();
             console2.log("current impl version", implVersion);
 
-            if (implVersion == 0) {
+            if (implVersion == 1) {
                 // Deploy new implementation specific to this target vault
                 address newImpl = address(new EulerCollateralVault(evc, targetVault));
                 vm.label(newImpl, string.concat("newCollateralVaultImpl_", vm.toString(targetVault)));
@@ -117,7 +117,7 @@ contract TwyneUpgradeBeacon is BatchScript {
 
                 // Sanity: ensure version incremented
                 uint256 newVersion = EulerCollateralVault(newImpl).version();
-                require(newVersion == 1, "New impl must be v1");
+                require(newVersion == 2, "New impl must be v1");
 
                 // Record deployment
                 finalJson = vm.serializeAddress(
@@ -126,8 +126,8 @@ contract TwyneUpgradeBeacon is BatchScript {
                     newImpl
                 );
             } else {
-                // If not 0, it must be 1 per upgrade plan
-                require(implVersion == 1, "Unexpected impl version (must be 0 or 1)");
+                // If not 1, it must be 2 per upgrade plan
+                require(implVersion == 2, "Unexpected impl version (must be 1 or 2)");
             }
         }
 
@@ -162,7 +162,7 @@ contract TwyneUpgradeBeacon is BatchScript {
             address currentImpl = UpgradeableBeacon(beacon).implementation();
             uint256 implVersion = EulerCollateralVault(currentImpl).version();
 
-            if (implVersion == 0) {
+            if (implVersion == 1) {
                 // Read deployed impl from Phase 0 output and upgrade beacon
                 string memory key = string.concat(".newImpl_", vm.toString(targetVault));
                 address deployedNewImpl = vm.parseJsonAddress(json, key);
@@ -175,8 +175,8 @@ contract TwyneUpgradeBeacon is BatchScript {
                 addToBatch(beacon, updateBeaconTxn);
                 console2.log("queued upgradeTo for targetVault", targetVault, "->", deployedNewImpl);
             } else {
-                // If not 0, it must be 1 per upgrade plan
-                require(implVersion == 1, "Unexpected impl version (must be 0 or 1)");
+                // If not 1, it must be 2 per upgrade plan
+                require(implVersion == 2, "Unexpected impl version (must be 1 or 2)");
             }
         }
 

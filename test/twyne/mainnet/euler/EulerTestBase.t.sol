@@ -23,8 +23,7 @@ import {MockPriceOracle} from "euler-vault-kit/../test/mocks/MockPriceOracle.sol
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 import {DeleverageOperator} from "src/operators/DeleverageOperator.sol";
-import {LeverageOperator_EulerFL} from "src/operators/LeverageOperator_EulerFL.sol";
-import {DeleverageOperator_EulerFL} from "src/operators/DeleverageOperator_EulerFL.sol";
+
 
 contract EulerTestBase is MainnetBase {
 
@@ -38,8 +37,7 @@ contract EulerTestBase is MainnetBase {
 
     LeverageOperator leverageOperator;
     DeleverageOperator deleverageOperator;
-    LeverageOperator_EulerFL leverageOperator_EulerFL;
-    DeleverageOperator_EulerFL deleverageOperator_EulerFL;
+
 
     function setUp() public virtual override {
 
@@ -181,15 +179,6 @@ contract EulerTestBase is MainnetBase {
             address(collateralVaultFactory)
         );
 
-        // Deploy LeverageOperator
-        leverageOperator_EulerFL = new LeverageOperator_EulerFL(
-            IEVault(eulerWETH).EVC(),
-            address(evc),
-            eulerSwapper,
-            eulerSwapVerifier,
-            address(collateralVaultFactory)
-        );
-
         // Deploy DeleverageOperator
         deleverageOperator = new DeleverageOperator(
             address(evc),
@@ -198,18 +187,8 @@ contract EulerTestBase is MainnetBase {
             address(collateralVaultFactory)
         );
 
-        // Deploy DeleverageOperator
-        deleverageOperator_EulerFL = new DeleverageOperator_EulerFL(
-            IEVault(eulerWETH).EVC(),
-            address(evc),
-            eulerSwapper,
-            address(collateralVaultFactory)
-        );
-
         vm.label(address(leverageOperator), "leverageOperator");
         vm.label(address(deleverageOperator), "deleverageOperator");
-        vm.label(address(leverageOperator_EulerFL), "leverageOperator_EulerFL");
-        vm.label(address(deleverageOperator_EulerFL), "deleverageOperator_EulerFL");
 
     }
 

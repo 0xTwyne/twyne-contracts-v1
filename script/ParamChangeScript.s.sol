@@ -56,21 +56,21 @@ contract ParamChangeScript is BatchScript {
 
     function addParameterChanges() internal isBatch(SAFE) {
         // TODO Change max liquidation LTV
-        // TODO Specify which collateral asset this applies to
-        address collateralAsset = eulerWETH;
+        // TODO Specify which intermediate vault this applies to
+        address intermediateVaultAddr = intermediateVault;
 
         bytes memory setMaxLiquidationLTVTxn = abi.encodeCall(
             VaultManager.setMaxLiquidationLTV,
-            (collateralAsset, 0.96e4) // 96%
+            (intermediateVaultAddr, 0.96e4, 0) // 96%
         );
         addToBatch(address(twyneVaultManager), 0, setMaxLiquidationLTVTxn);
 
         // TODO Update IRM curve of intermediate vault
         IRMTwyneCurve newIRM = new IRMTwyneCurve({
-            idealKinkInterestRate_: 2e3, // 20%
-            linearKinkUtilizationRate_: 9e3, // 90%
-            maxInterestRate_: 3e4, // 300%
-            nonlinearPoint_: 5e17 // 50%
+            minInterest_: 0, // 0
+            linearParameter_: 2222, // 0.2222
+            polynomialParameter_: 27778, // 2.7778
+            nonlinearPoint_: 5e17 // 0.5
         });
 
         bytes memory setInterestRateModelTxn = abi.encodeCall(

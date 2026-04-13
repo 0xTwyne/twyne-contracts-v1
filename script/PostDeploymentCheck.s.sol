@@ -11,11 +11,11 @@ import {ProtocolConfig} from "euler-vault-kit/ProtocolConfig/ProtocolConfig.sol"
 import {USD} from "euler-price-oracle/test/utils/EthereumAddresses.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IEVault, IERC20} from "euler-vault-kit/EVault/IEVault.sol";
-import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
+import {OP_BORROW, OP_LIQUIDATE, OP_FLASHLOAN, OP_PULL_DEBT, CFG_DONT_SOCIALIZE_DEBT} from "euler-vault-kit/EVault/shared/Constants.sol";
+import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
-import {HealthStatViewer} from "src/twyne/HealthStatViewer.sol";
 import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 
@@ -47,7 +47,6 @@ contract PostDeploymentCheck is Script {
     GenericFactory factory;
     IEVault intermediateVault;
     EulerCollateralVault deployer_collateral_vault;
-    HealthStatViewer healthViewer;
     EulerWrapper eulerWrapper;
     LeverageOperator leverageOperator;
 
@@ -86,7 +85,6 @@ contract PostDeploymentCheck is Script {
         factory = GenericFactory(vm.parseJsonAddress(twyneAddressesJson, ".GenericFactory"));
         intermediateVault = IEVault(vm.parseJsonAddress(twyneAddressesJson, ".intermediateVault"));
         deployer_collateral_vault = EulerCollateralVault(vm.parseJsonAddress(twyneAddressesJson, ".deployerExampleCollateralVault"));
-        healthViewer = HealthStatViewer(vm.parseJsonAddress(twyneAddressesJson, ".healthStatViewer"));
         eulerWrapper = EulerWrapper(vm.parseJsonAddress(twyneAddressesJson, ".eulerWrapper"));
         leverageOperator = LeverageOperator(vm.parseJsonAddress(twyneAddressesJson, ".leverageOperator"));
         evc = EthereumVaultConnector(payable(collateralVaultFactory.EVC()));
@@ -95,7 +93,6 @@ contract PostDeploymentCheck is Script {
         vm.label(address(factory), "factory");
         vm.label(address(intermediateVault), "intermediateVault");
         vm.label(address(deployer_collateral_vault), "deployer_collateral_vault");
-        vm.label(address(healthViewer), "healthViewer");
         vm.label(address(eulerWrapper), "eulerWrapper");
         vm.label(address(leverageOperator), "leverageOperator");
         vm.label(address(evc), "evc");
@@ -116,6 +113,7 @@ contract PostDeploymentCheck is Script {
         checkLeverageOperatorConfiguration();
         checkIntegrationBetweenContracts();
         checkParameterBounds();
+        checkPullDebtBlocked();
         console2.log("All checks complete, looks good!");
     }
 
@@ -126,7 +124,6 @@ contract PostDeploymentCheck is Script {
         require(address(oracleRouter) != address(0), "OracleRouter not deployed");
         require(address(intermediateVault) != address(0), "Intermediate vault not deployed");
         require(address(deployer_collateral_vault) != address(0), "Collateral vault not deployed");
-        require(address(healthViewer) != address(0), "HealthStatViewer not deployed");
         require(address(eulerWrapper) != address(0), "EulerWrapper not deployed");
         require(address(leverageOperator) != address(0), "LeverageOperator not deployed");
 
@@ -136,7 +133,6 @@ contract PostDeploymentCheck is Script {
         require(address(oracleRouter).code.length > 0, "OracleRouter has no code");
         require(address(intermediateVault).code.length > 0, "Intermediate vault has no code");
         require(address(deployer_collateral_vault).code.length > 0, "Collateral vault has no code");
-        require(address(healthViewer).code.length > 0, "HealthStatViewer has no code");
         require(address(eulerWrapper).code.length > 0, "EulerWrapper has no code");
         require(address(leverageOperator).code.length > 0, "LeverageOperator has no code");
     }
@@ -145,6 +141,7 @@ contract PostDeploymentCheck is Script {
     function checkOwnershipAndGovernance() internal view {
         require(vaultManager.owner() == admin, "VaultManager owner incorrect");
         require(collateralVaultFactory.owner() == admin, "CollateralVaultFactory owner incorrect");
+        require(collateralVaultFactory.pauseGuardian() == admin, "CollateralVaultFactory pause guardian incorrect");
         require(oracleRouter.governor() == address(vaultManager), "OracleRouter governor should be VaultManager");
         require(intermediateVault.governorAdmin() == address(vaultManager), "Intermediate vault governor incorrect");
         require(admin != address(0), "Admin address is zero");
@@ -182,12 +179,12 @@ contract PostDeploymentCheck is Script {
 
         address collateralAsset = intermediateVault.asset();
         // Check max liquidation LTV for eulerWETH
-        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(collateralAsset);
+        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(address(intermediateVault));
         require(maxLiqLTV == 0.94e4, "Max liquidation LTV not set correctly");
         require(maxLiqLTV > twyneLiqLTV, "Max liquidation LTV should be greater than twyne LTV");
 
         // Check external liquidation buffer
-        uint256 extLiqBuffer = vaultManager.externalLiqBuffers(collateralAsset);
+        uint256 extLiqBuffer = vaultManager.externalLiqBuffers(address(intermediateVault));
         require(extLiqBuffer == 1e4, "External liquidation buffer not set correctly");
 
         // Check allowed target vault
@@ -198,7 +195,7 @@ contract PostDeploymentCheck is Script {
         require(vaultManager.oracleRouter().resolvedVaults(collateralAsset) == IEVault(collateralAsset).asset(), "Intermediate vault not oracle resolved");
 
         // Check intermediate vault is set
-        require(address(vaultManager.getIntermediateVault(collateralAsset)) == address(intermediateVault), "Intermediate vault not set in VaultManager");
+        require(vaultManager.isIntermediateVault(address(intermediateVault)), "Intermediate vault not set in VaultManager");
     }
 
     /// @notice Verify intermediate vault configuration
@@ -213,6 +210,7 @@ contract PostDeploymentCheck is Script {
         require(hookedOps & OP_BORROW != 0, "Borrow hook not set");
         require(hookedOps & OP_LIQUIDATE != 0, "Liquidate hook not set");
         require(hookedOps & OP_FLASHLOAN != 0, "Flashloan hook not set");
+        require(hookedOps & OP_PULL_DEBT != 0, "PullDebt hook not set");
 
         // Check interest rate model is set
         require(intermediateVault.interestRateModel() != address(0), "Interest rate model not set");
@@ -287,7 +285,7 @@ contract PostDeploymentCheck is Script {
         require(twyneLiqLTV >= 0.5e4, "Liquidation LTV too low");
 
         // Check that max liquidation LTV is higher than twyne LTV
-        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(intermediateVault.asset());
+        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(address(intermediateVault));
         require(maxLiqLTV > twyneLiqLTV, "Max liquidation LTV should be higher than twyne LTV");
         require(maxLiqLTV <= 0.95e4, "Max liquidation LTV too high");
     }
@@ -324,7 +322,7 @@ contract PostDeploymentCheck is Script {
         require(intermediateVault.liquidationCoolOffTime() > 0, "Liquidation cooloff time should be positive");
 
         // Check LTV values
-        require(deployer_collateral_vault.twyneLiqLTV() <= vaultManager.maxTwyneLTVs(intermediateVault.asset()), "Collateral vault LTV exceeds maximum");
+        require(deployer_collateral_vault.twyneLiqLTV() <= vaultManager.maxTwyneLTVs(address(intermediateVault)), "Collateral vault LTV exceeds maximum");
     }
 
     /// @notice Verify LeverageOperator configuration
@@ -334,5 +332,16 @@ contract PostDeploymentCheck is Script {
         require(leverageOperator.SWAPPER() != address(0), "LeverageOperator SWAPPER not set");
         require(leverageOperator.SWAP_VERIFIER() != address(0), "LeverageOperator SWAP_VERIFIER not set");
         require(address(leverageOperator.MORPHO()) != address(0), "LeverageOperator MORPHO not set");
+    }
+
+    /// @notice Verify pullDebt is blocked on intermediate vault
+    function checkPullDebtBlocked() internal {
+        // Try to call pullDebt on intermediate vault - should revert with T_OperationDisabled
+        try intermediateVault.pullDebt(0, address(deployer_collateral_vault)) {
+            revert("pullDebt should be blocked");
+        } catch (bytes memory reason) {
+            // Check that it reverts with T_OperationDisabled selector
+            require(bytes4(reason) == TwyneErrors.T_OperationDisabled.selector, "pullDebt should revert with T_OperationDisabled");
+        }
     }
 }

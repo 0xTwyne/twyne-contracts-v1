@@ -1279,7 +1279,7 @@ contract AaveLiquidationTest is AaveTestBase {
         test_aave_setupLiquidationAccrueInterest(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
-        vm.startPrank(address(twyneVaultManager.owner()));
+        vm.startPrank(address(twyneVaultManager.admin()));
         twyneVaultManager.setLTV(aaveEthVault, address(alice_aave_vault), 0.1e3, 0.15e3, 0);
         vm.stopPrank();
 
@@ -1770,7 +1770,7 @@ contract AaveLiquidationTest is AaveTestBase {
         test_aave_setupLiquidationFromSafetyBufferChange(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
-        vm.startPrank(address(twyneVaultManager.owner()));
+        vm.startPrank(address(twyneVaultManager.admin()));
         twyneVaultManager.setLTV(aaveEthVault, address(alice_aave_vault), 0.1e3, 0.15e3, 0);
         vm.stopPrank();
 
@@ -2266,7 +2266,7 @@ contract AaveLiquidationTest is AaveTestBase {
         test_aave_setupLiquidationFromExternalLTVChange(twyneLiqLTV);
 
         // lower the liquidation LTV on the EVK vault to below the current borrow LTV to make it instantly liquidatable
-        vm.startPrank(address(twyneVaultManager.owner()));
+        vm.startPrank(address(twyneVaultManager.admin()));
         twyneVaultManager.setLTV(aaveEthVault, address(alice_aave_vault), 0.1e3, 0.15e3, 0);
         vm.stopPrank();
 

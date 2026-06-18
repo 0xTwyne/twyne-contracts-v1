@@ -36,8 +36,9 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
     mapping(address borrower => uint nonce) public nonce;
     mapping(address targetVault => mapping(address collateralAsset => mapping( address targetAsset => uint8 categoryId))) public categoryId;
     address public pauseGuardian;
+    address public admin;
 
-    uint[48] private __gap;
+    uint[47] private __gap;
 
     constructor(address _evc) EVCUtil(_evc) {
         _disableInitializers();
@@ -49,14 +50,20 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
         __Ownable_init(_owner);
         __Pausable_init();
         __UUPSUpgradeable_init();
+        admin = _owner;
     }
 
     /// @dev override required by UUPSUpgradeable
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
+    modifier onlyAdmin() {
+        require(_msgSender() == admin, CallerNotAdmin());
+        _;
+    }
+
     /// @dev increment the version for proxy upgrades
     function version() external pure returns (uint) {
-        return 3;
+        return 4;
     }
 
     function getCollateralVaults(address borrower) external view returns (address[] memory) {
@@ -64,13 +71,13 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
     }
 
     /// @notice Set a new vault manager address. Governance-only.
-    function setVaultManager(address _manager) external onlyOwner {
+    function setVaultManager(address _manager) external onlyAdmin {
         vaultManager = VaultManager(payable(_manager));
         emit T_SetVaultManager(_manager);
     }
 
     /// @notice Set a new beacon address for a specific target vault. Governance-only.
-    function setBeacon(address targetVault, address beacon) external onlyOwner {
+    function setBeacon(address targetVault, address beacon) external onlyAdmin {
         collateralVaultBeacon[targetVault] = beacon;
         emit T_SetBeacon(targetVault, beacon);
     }
@@ -82,13 +89,20 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
         emit T_SetCollateralVaultLiquidated(msg.sender, liquidator);
     }
 
-    function setCategoryId(address _targetVault, address _collateralAsset, address _targetAsset, uint8 _categoryId) external onlyOwner {
+    function setCategoryId(address _targetVault, address _collateralAsset, address _targetAsset, uint8 _categoryId) external onlyAdmin {
         categoryId[_targetVault][_collateralAsset][_targetAsset] = _categoryId;
         emit T_CategoryIdSet(_targetVault, _collateralAsset, _targetAsset, _categoryId);
     }
 
+    /// @notice Set the operational admin. Owner-only so this path can be timelocked.
+    function setAdmin(address _admin) external onlyOwner {
+        require(_admin != address(0), ZeroAddress());
+        admin = _admin;
+        emit T_SetAdmin(_admin);
+    }
+
     /// @notice Set a dedicated pause guardian that can only trigger emergency pauses.
-    function setPauseGuardian(address _pauseGuardian) external onlyOwner {
+    function setPauseGuardian(address _pauseGuardian) external onlyAdmin {
         pauseGuardian = _pauseGuardian;
         emit T_SetPauseGuardian(_pauseGuardian);
     }
@@ -96,13 +110,13 @@ contract CollateralVaultFactory is UUPSUpgradeable, OwnableUpgradeable, Pausable
     /// @dev pause deposit and borrowing via collateral vault
     function pause() external {
         address sender = _msgSender();
-        require(sender == owner() || sender == pauseGuardian, CallerNotOwnerOrPauseGuardian());
+        require(sender == admin || sender == pauseGuardian, CallerNotOwnerOrPauseGuardian());
         _pause();
         emit T_FactoryPause(true);
     }
 
     /// @dev unpause deposit and borrowing via collateral vault
-    function unpause() external onlyOwner {
+    function unpause() external onlyAdmin {
         _unpause();
         emit T_FactoryPause(false);
     }

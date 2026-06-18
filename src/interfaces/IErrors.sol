@@ -32,6 +32,8 @@ interface IErrors {
     error CallerNotCollateralVault(); // 0xaff5551d
     error T_WithdrawMoreThanMax(); // 0x2755faea
     error CallerNotOwnerOrPauseGuardian(); // 0x384b6fd5
+    error CallerNotAdmin();
+    error ZeroAddress();
 
     // LeverageOperator errors
     error T_CallerNotBorrower(); // 0xf74e1da2

@@ -21,12 +21,14 @@ contract CollateralVaultFactoryUpgradeTest is Test {
 
     VaultManager public vaultManager;
     address public admin;
+    address public timelock;
     address public user;
     EthereumVaultConnector public evc;
     EulerRouter public oracleRouter;
 
     function setUp() public {
         admin = makeAddr("admin");
+        timelock = makeAddr("timelock");
         user = makeAddr("user");
 
         // Deploy dependencies
@@ -60,7 +62,20 @@ contract CollateralVaultFactoryUpgradeTest is Test {
 
     function test_Initialization() public view {
         assertEq(factory.owner(), admin);
+        assertEq(factory.admin(), admin);
         assertEq(address(factory.vaultManager()), address(vaultManager));
+    }
+
+    function test_InitializeSetsAdminToOwner() public {
+        CollateralVaultFactory freshImpl = new CollateralVaultFactory(address(evc));
+        ERC1967Proxy freshProxy = new ERC1967Proxy(
+            address(freshImpl),
+            abi.encodeCall(CollateralVaultFactory.initialize, (admin))
+        );
+        CollateralVaultFactory freshFactory = CollateralVaultFactory(payable(address(freshProxy)));
+
+        assertEq(freshFactory.owner(), admin);
+        assertEq(freshFactory.admin(), admin);
     }
 
     function test_UpgradeImplementation() public {
@@ -73,6 +88,7 @@ contract CollateralVaultFactoryUpgradeTest is Test {
 
         // Verify the upgrade worked by checking that the contract still functions
         assertEq(factory.owner(), admin);
+        assertEq(factory.admin(), admin);
         assertEq(address(factory.vaultManager()), address(vaultManager));
     }
 
@@ -108,6 +124,7 @@ contract CollateralVaultFactoryUpgradeTest is Test {
         // Verify state is preserved
         assertEq(factory.collateralVaultBeacon(address(0x123)), testBeacon);
         assertEq(factory.owner(), admin);
+        assertEq(factory.admin(), admin);
         assertEq(address(factory.vaultManager()), address(vaultManager));
     }
 
@@ -121,6 +138,118 @@ contract CollateralVaultFactoryUpgradeTest is Test {
         // Try to initialize the proxy again
         vm.expectRevert();
         factory.initialize(user);
+    }
+
+    function test_SetAdminOnlyOwner() public {
+        address newAdmin = makeAddr("newAdmin");
+
+        vm.prank(user);
+        vm.expectRevert();
+        factory.setAdmin(newAdmin);
+
+        vm.prank(admin);
+        factory.setAdmin(newAdmin);
+        assertEq(factory.admin(), newAdmin);
+    }
+
+    function test_SetAdminRevertsForZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(TwyneErrors.ZeroAddress.selector);
+        factory.setAdmin(address(0));
+    }
+
+    function test_SetAdminRevokesOldAdminOperationalControl() public {
+        address newAdmin = makeAddr("newAdmin");
+
+        vm.prank(admin);
+        factory.setAdmin(newAdmin);
+
+        vm.prank(admin);
+        vm.expectRevert(TwyneErrors.CallerNotAdmin.selector);
+        factory.setBeacon(address(0x123), makeAddr("beacon"));
+
+        vm.prank(newAdmin);
+        factory.setBeacon(address(0x123), makeAddr("newBeacon"));
+    }
+
+    function test_UpgradeCanSetAdminInSameCall() public {
+        address newAdmin = makeAddr("newAdmin");
+        factoryImplV2 = new CollateralVaultFactory(address(evc));
+
+        vm.prank(admin);
+        factory.upgradeToAndCall(address(factoryImplV2), abi.encodeCall(CollateralVaultFactory.setAdmin, (newAdmin)));
+
+        assertEq(factory.owner(), admin);
+        assertEq(factory.admin(), newAdmin);
+        assertEq(address(factory.vaultManager()), address(vaultManager));
+    }
+
+    function test_AdminKeepsOperationalControlAfterOwnerTransferredToTimelock() public {
+        vm.prank(admin);
+        factory.transferOwnership(timelock);
+
+        assertEq(factory.owner(), timelock);
+        assertEq(factory.admin(), admin);
+
+        address beacon = makeAddr("beacon");
+        vm.prank(admin);
+        factory.setBeacon(address(0x123), beacon);
+        assertEq(factory.collateralVaultBeacon(address(0x123)), beacon);
+
+        vm.prank(admin);
+        factory.setCategoryId(address(0x123), address(0x456), address(0x789), 1);
+        assertEq(factory.categoryId(address(0x123), address(0x456), address(0x789)), 1);
+
+        address pauseGuardian = makeAddr("pauseGuardian");
+        vm.prank(admin);
+        factory.setPauseGuardian(pauseGuardian);
+        assertEq(factory.pauseGuardian(), pauseGuardian);
+
+        vm.prank(admin);
+        factory.pause();
+        assertTrue(factory.paused());
+
+        vm.prank(admin);
+        factory.unpause();
+        assertFalse(factory.paused());
+    }
+
+    function test_TimelockOwnerCannotCallAdminOnlyFunctions() public {
+        vm.prank(admin);
+        factory.transferOwnership(timelock);
+
+        vm.prank(timelock);
+        vm.expectRevert(TwyneErrors.CallerNotAdmin.selector);
+        factory.setBeacon(address(0x123), makeAddr("beacon"));
+
+        vm.prank(timelock);
+        vm.expectRevert(TwyneErrors.CallerNotAdmin.selector);
+        factory.setCategoryId(address(0x123), address(0x456), address(0x789), 1);
+
+        vm.prank(timelock);
+        vm.expectRevert(TwyneErrors.CallerNotAdmin.selector);
+        factory.setPauseGuardian(makeAddr("pauseGuardian"));
+
+        vm.prank(timelock);
+        vm.expectRevert(TwyneErrors.CallerNotAdmin.selector);
+        factory.setVaultManager(address(vaultManager));
+    }
+
+    function test_AdminCannotUpgradeAfterOwnerTransferredToTimelock() public {
+        factoryImplV2 = new CollateralVaultFactory(address(evc));
+
+        vm.prank(admin);
+        factory.transferOwnership(timelock);
+
+        vm.prank(admin);
+        vm.expectRevert();
+        factory.upgradeToAndCall(address(factoryImplV2), "");
+
+        vm.prank(timelock);
+        factory.upgradeToAndCall(address(factoryImplV2), "");
+
+        assertEq(factory.owner(), timelock);
+        assertEq(factory.admin(), admin);
     }
 
     function test_UpgradePreservesPauseState() public {
@@ -142,7 +271,7 @@ contract CollateralVaultFactoryUpgradeTest is Test {
         assertTrue(factory.paused());
     }
 
-    function test_SetPauseGuardianAndOwnerCanPauseUnpause() public {
+    function test_SetPauseGuardianAndAdminCanPauseUnpause() public {
         address pauseGuardian = makeAddr("pauseGuardian");
         vm.prank(admin);
         factory.setPauseGuardian(pauseGuardian);
@@ -157,7 +286,7 @@ contract CollateralVaultFactoryUpgradeTest is Test {
         assertFalse(factory.paused());
     }
 
-    function test_PauseRevertsForNonOwnerAndNonGuardian() public {
+    function test_PauseRevertsForNonAdminAndNonGuardian() public {
         address pauseGuardian = makeAddr("pauseGuardian");
         vm.prank(admin);
         factory.setPauseGuardian(pauseGuardian);

@@ -1291,7 +1291,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Lower maxTwyneLTV
         uint16 newMaxTwyneLTV = initialMaxTwyneLTV - 500; // Reduce by 5%
-        vm.prank(twyneVaultManager.owner());
+        vm.prank(twyneVaultManager.admin());
         twyneVaultManager.setMaxLiquidationLTV(address(intermediateVault), newMaxTwyneLTV, 0);
 
         // Check if we can rebalance (have excess credit since invariant decreased)
@@ -1337,7 +1337,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         uint16 newBuffer = initialBuffer - 200; // Decrease by 2%
         if (newBuffer == 0) newBuffer = 1;
 
-        vm.prank(twyneVaultManager.owner());
+        vm.prank(twyneVaultManager.admin());
         twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), newBuffer, 0);
 
         // canRebalance should fail (no excess credit)
@@ -1385,7 +1385,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         uint16 newBuffer = initialBuffer + 200; // Increase by 2%
         if (newBuffer > MAXFACTOR) newBuffer = uint16(MAXFACTOR);
 
-        vm.prank(twyneVaultManager.owner());
+        vm.prank(twyneVaultManager.admin());
         twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), newBuffer, 0);
 
         // Check if we can rebalance

@@ -17,7 +17,6 @@ interface ICollateralVaultBase {
 /// @title VaultManager
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
 /// @notice Manages twyne parameters that affect it globally: assets allowed, LTVs, interest rates.
-/// To be owned by Twyne multisig.
 contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     uint internal constant MAXFACTOR = 1e4;
 
@@ -52,10 +51,17 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     mapping(address intermediateVault => bool) public isIntermediateVault;
 
-    uint[46] private __gap;
+    address public admin;
 
-    modifier onlyCollateralVaultFactoryOrOwner() {
-        require(msg.sender == owner() || msg.sender == collateralVaultFactory, CallerNotOwnerOrCollateralVaultFactory());
+    uint[45] private __gap;
+
+    modifier onlyAdmin() {
+        require(_msgSender() == admin, CallerNotAdmin());
+        _;
+    }
+
+    modifier onlyCollateralVaultFactoryOrAdmin() {
+        require(msg.sender == admin || msg.sender == collateralVaultFactory, CallerNotOwnerOrCollateralVaultFactory());
         _;
     }
 
@@ -69,6 +75,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
         __Ownable_init(_owner);
         __UUPSUpgradeable_init();
         collateralVaultFactory = _factory;
+        admin = _owner;
     }
 
     /// @dev override required by UUPSUpgradeable
@@ -76,11 +83,11 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     /// @dev increment the version for proxy upgrades
     function version() external pure returns (uint) {
-        return 3;
+        return 4;
     }
 
     /// @notice Set oracleRouter address. Governance-only.
-    function setOracleRouter(address _oracle) external onlyOwner {
+    function setOracleRouter(address _oracle) external onlyAdmin {
         oracleRouter = EulerRouter(_oracle);
         emit T_SetOracleRouter(_oracle);
     }
@@ -88,7 +95,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @notice Register or unregister an intermediate vault. Governance-only.
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _value true to register, false to unregister.
-    function setIntermediateVault(IEVault _intermediateVault, bool _value) external onlyOwner {
+    function setIntermediateVault(IEVault _intermediateVault, bool _value) external onlyAdmin {
         isIntermediateVault[address(_intermediateVault)] = _value;
         emit T_SetIntermediateVault(address(_intermediateVault), _value);
     }
@@ -96,7 +103,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @notice Set an allowed target vault for a specific intermediate vault. Governance-only.
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
-    function setAllowedTargetVault(address _intermediateVault, address _targetVault) external onlyOwner {
+    function setAllowedTargetVault(address _intermediateVault, address _targetVault) external onlyAdmin {
         isAllowedTargetVault[_intermediateVault][_targetVault] = true;
         allowedTargetVaultList[_intermediateVault].push(_targetVault);
         emit T_AddAllowedTargetVault(_intermediateVault, _targetVault);
@@ -107,7 +114,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
     /// @param _targetAsset The target asset to borrow
-    function setAllowedTargetAsset(address _intermediateVault, address _targetVault, address _targetAsset) external onlyOwner {
+    function setAllowedTargetAsset(address _intermediateVault, address _targetVault, address _targetAsset) external onlyAdmin {
         isAllowedTargetAssets[_intermediateVault][_targetVault][_targetAsset] = true;
         emit  T_AddAllowedTargetVaultAsset(_intermediateVault, _targetVault, _targetAsset);
     }
@@ -116,7 +123,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _intermediateVault address of the intermediate vault.
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
     /// @param _index The index at which this _targetVault is stored in `allowedTargetVaultList`.
-    function removeAllowedTargetVault(address _intermediateVault, address _targetVault, uint _index) external onlyOwner {
+    function removeAllowedTargetVault(address _intermediateVault, address _targetVault, uint _index) external onlyAdmin {
         isAllowedTargetVault[_intermediateVault][_targetVault] = false;
 
         require(allowedTargetVaultList[_intermediateVault][_index] == _targetVault, IncorrectIndex());
@@ -138,7 +145,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _rampDuration ramp duration in seconds. Set to 0 for immediate update.
     /// @dev If `_rampDuration > 0`, `_ltv` must be strictly lower than the current effective maxTwyneLTV.
     /// The current effective value is snapshotted as the ramp starting point.
-    function setMaxLiquidationLTV(address _intermediateVault, uint16 _ltv, uint32 _rampDuration) external onlyOwner {
+    function setMaxLiquidationLTV(address _intermediateVault, uint16 _ltv, uint32 _rampDuration) external onlyAdmin {
         require(_ltv <= MAXFACTOR, ValueOutOfRange());
         uint16 currentLTV = maxTwyneLTVs(_intermediateVault);
         if (_rampDuration > 0) {
@@ -160,7 +167,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _rampDuration ramp duration in seconds. Set to 0 for immediate update.
     /// @dev If `_rampDuration > 0`, `_liqBuffer` must be strictly lower than the current effective externalLiqBuffer.
     /// The current effective value is snapshotted as the ramp starting point.
-    function setExternalLiqBuffer(address _intermediateVault, uint16 _liqBuffer, uint32 _rampDuration) external onlyOwner {
+    function setExternalLiqBuffer(address _intermediateVault, uint16 _liqBuffer, uint32 _rampDuration) external onlyAdmin {
         require(_liqBuffer <= MAXFACTOR, ValueOutOfRange());
         uint16 currentBuffer = externalLiqBuffers(_intermediateVault);
         if (_rampDuration > 0) {
@@ -214,9 +221,16 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     /// @notice Set new collateralVaultFactory address. Governance-only.
     /// @param _factory new collateralVaultFactory address.
-    function setCollateralVaultFactory(address _factory) external onlyOwner {
+    function setCollateralVaultFactory(address _factory) external onlyAdmin {
         collateralVaultFactory = _factory;
         emit T_SetCollateralVaultFactory(_factory);
+    }
+
+    /// @notice Set the operational admin. Owner-only so this path can be timelocked.
+    function setAdmin(address _admin) external onlyOwner {
+        require(_admin != address(0), ZeroAddress());
+        admin = _admin;
+        emit T_SetAdmin(_admin);
     }
 
     /// @notice Set new LTV values for an intermediate vault by calling EVK.setLTV(). Callable by governance or collateral vault factory.
@@ -227,7 +241,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _rampDuration ramp duration in seconds (0 for immediate effect) during which the liquidation LTV will change.
     function setLTV(IEVault _intermediateVault, address _collateralVault, uint16 _borrowLimit, uint16 _liquidationLimit, uint32 _rampDuration)
         external
-        onlyCollateralVaultFactoryOrOwner
+        onlyCollateralVaultFactoryOrAdmin
     {
         require(ICollateralVaultBase(_collateralVault).asset() == _intermediateVault.asset(), AssetMismatch());
         _intermediateVault.setLTV(_collateralVault, _borrowLimit, _liquidationLimit, _rampDuration);
@@ -239,7 +253,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _allow bool value to pass to govSetResolvedVault. True to configure the vault, false to clear the record.
     /// @dev called by createCollateralVault() when a new collateral vault is created so collateral can be price properly.
     /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.
-    function setOracleResolvedVault(address _vault, bool _allow) external onlyCollateralVaultFactoryOrOwner {
+    function setOracleResolvedVault(address _vault, bool _allow) external onlyCollateralVaultFactoryOrAdmin {
         oracleRouter.govSetResolvedVault(_vault, _allow);
         emit T_SetOracleResolvedVault(_vault, _allow);
     }
@@ -250,7 +264,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _allow bool value to pass to govSetResolvedVault. True to configure the vault, false to clear the record.
     /// @dev called by createCollateralVault() when a new collateral vault is created so collateral can be price properly.
     /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.
-    function setOracleResolvedVaultForOracleRouter(address _oracleRouter, address _vault, bool _allow) external onlyCollateralVaultFactoryOrOwner {
+    function setOracleResolvedVaultForOracleRouter(address _oracleRouter, address _vault, bool _allow) external onlyCollateralVaultFactoryOrAdmin {
         EulerRouter(_oracleRouter).govSetResolvedVault(_vault, _allow);
         emit T_SetOracleResolvedVault(_oracleRouter, _vault, _allow);
     }
@@ -258,7 +272,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @notice Perform an arbitrary external call. Governance-only.
     /// @dev VaultManager is an owner/admin of many contracts in the Twyne system.
     /// @dev This function helps Governance in case a specific a specific external function call was not implemented.
-    function doCall(address to, uint value, bytes memory data) external payable onlyOwner {
+    function doCall(address to, uint value, bytes memory data) external payable onlyAdmin {
         (bool success, bytes memory _data) = to.call{value: value}(data);
         if (!success) RevertBytes.revertBytes(_data);
         emit T_DoCall(to, value, data);

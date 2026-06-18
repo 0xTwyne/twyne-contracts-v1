@@ -5,6 +5,7 @@ pragma solidity ^0.8.28;
 interface IEvents {
     // CollateralVaultFactory
     event T_SetVaultManager(address indexed vaultManager);
+    event T_SetAdmin(address indexed admin);
     event T_SetBeacon(address indexed targetVault, address indexed beacon);
     event T_SetPauseGuardian(address indexed pauseGuardian);
     event T_SetCollateralVaultLiquidated(address indexed collateralVault, address indexed liquidator);

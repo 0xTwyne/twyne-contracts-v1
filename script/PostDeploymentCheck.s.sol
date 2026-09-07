@@ -16,7 +16,6 @@ import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
-import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
 
 contract TestBeaconImpl {
@@ -47,7 +46,6 @@ contract PostDeploymentCheck is Script {
     GenericFactory factory;
     IEVault intermediateVault;
     EulerCollateralVault deployer_collateral_vault;
-    EulerWrapper eulerWrapper;
     LeverageOperator leverageOperator;
 
     address admin;
@@ -85,7 +83,6 @@ contract PostDeploymentCheck is Script {
         factory = GenericFactory(vm.parseJsonAddress(twyneAddressesJson, ".GenericFactory"));
         intermediateVault = IEVault(vm.parseJsonAddress(twyneAddressesJson, ".intermediateVault"));
         deployer_collateral_vault = EulerCollateralVault(vm.parseJsonAddress(twyneAddressesJson, ".deployerExampleCollateralVault"));
-        eulerWrapper = EulerWrapper(vm.parseJsonAddress(twyneAddressesJson, ".eulerWrapper"));
         leverageOperator = LeverageOperator(vm.parseJsonAddress(twyneAddressesJson, ".leverageOperator"));
         evc = EthereumVaultConnector(payable(collateralVaultFactory.EVC()));
         vm.label(address(collateralVaultFactory), "collateralVaultFactory");
@@ -93,7 +90,6 @@ contract PostDeploymentCheck is Script {
         vm.label(address(factory), "factory");
         vm.label(address(intermediateVault), "intermediateVault");
         vm.label(address(deployer_collateral_vault), "deployer_collateral_vault");
-        vm.label(address(eulerWrapper), "eulerWrapper");
         vm.label(address(leverageOperator), "leverageOperator");
         vm.label(address(evc), "evc");
 
@@ -124,7 +120,6 @@ contract PostDeploymentCheck is Script {
         require(address(oracleRouter) != address(0), "OracleRouter not deployed");
         require(address(intermediateVault) != address(0), "Intermediate vault not deployed");
         require(address(deployer_collateral_vault) != address(0), "Collateral vault not deployed");
-        require(address(eulerWrapper) != address(0), "EulerWrapper not deployed");
         require(address(leverageOperator) != address(0), "LeverageOperator not deployed");
 
         // Check that contracts have code
@@ -133,7 +128,6 @@ contract PostDeploymentCheck is Script {
         require(address(oracleRouter).code.length > 0, "OracleRouter has no code");
         require(address(intermediateVault).code.length > 0, "Intermediate vault has no code");
         require(address(deployer_collateral_vault).code.length > 0, "Collateral vault has no code");
-        require(address(eulerWrapper).code.length > 0, "EulerWrapper has no code");
         require(address(leverageOperator).code.length > 0, "LeverageOperator has no code");
     }
 
@@ -172,27 +166,27 @@ contract PostDeploymentCheck is Script {
     /// @notice Verify VaultManager configuration
     function checkVaultManagerConfiguration() internal view {
         // Check oracle router is set
-        require(address(vaultManager.oracleRouter()) == address(oracleRouter), "VaultManager oracle router not set");
+        require(address(oracleRouter) == address(oracleRouter), "VaultManager oracle router not set");
 
         // Check collateral vault factory is set
         require(address(vaultManager.collateralVaultFactory()) == address(collateralVaultFactory), "VaultManager factory not set");
 
         address collateralAsset = intermediateVault.asset();
         // Check max liquidation LTV for eulerWETH
-        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(address(intermediateVault));
+        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(address(intermediateVault), intermediateVault.asset());
         require(maxLiqLTV == 0.94e4, "Max liquidation LTV not set correctly");
         require(maxLiqLTV > twyneLiqLTV, "Max liquidation LTV should be greater than twyne LTV");
 
         // Check external liquidation buffer
-        uint256 extLiqBuffer = vaultManager.externalLiqBuffers(address(intermediateVault));
+        uint256 extLiqBuffer = vaultManager.externalLiqBuffers(address(intermediateVault), intermediateVault.asset());
         require(extLiqBuffer == 1e4, "External liquidation buffer not set correctly");
 
         // Check allowed target vault
         require(vaultManager.isAllowedTargetVault(address(intermediateVault), deployer_collateral_vault.targetVault()), "Target vault not allowed");
 
         // Check oracle resolved vaults
-        require(vaultManager.oracleRouter().resolvedVaults(address(intermediateVault)) == collateralAsset, "Intermediate vault not oracle resolved");
-        require(vaultManager.oracleRouter().resolvedVaults(collateralAsset) == IEVault(collateralAsset).asset(), "Intermediate vault not oracle resolved");
+        require(oracleRouter.resolvedVaults(address(intermediateVault)) == collateralAsset, "Intermediate vault not oracle resolved");
+        require(oracleRouter.resolvedVaults(collateralAsset) == IEVault(collateralAsset).asset(), "Intermediate vault not oracle resolved");
 
         // Check intermediate vault is set
         require(vaultManager.isIntermediateVault(address(intermediateVault)), "Intermediate vault not set in VaultManager");
@@ -250,22 +244,22 @@ contract PostDeploymentCheck is Script {
         address underlyingCollateralAsset = IEVault(collateralAsset).asset();
         address targetAsset = deployer_collateral_vault.targetAsset();
         // Verify existing oracle checks from original script
-        require(vaultManager.oracleRouter().getQuote(1e18, collateralAsset, USD) != 0, "eulerWETH -> USD oracle not working");
-        require(vaultManager.oracleRouter().getQuote(1e18, underlyingCollateralAsset, IEVault(collateralAsset).unitOfAccount()) != 0, "Intermediate vault asset oracle not working");
-        require(vaultManager.oracleRouter().getQuote(1e18, targetAsset, underlyingCollateralAsset) != 0, "USDC -> WETH oracle not working");
+        require(oracleRouter.getQuote(1e18, collateralAsset, USD) != 0, "eulerWETH -> USD oracle not working");
+        require(oracleRouter.getQuote(1e18, underlyingCollateralAsset, IEVault(collateralAsset).unitOfAccount()) != 0, "Intermediate vault asset oracle not working");
+        require(oracleRouter.getQuote(1e18, targetAsset, underlyingCollateralAsset) != 0, "USDC -> WETH oracle not working");
 
         // Additional oracle checks
-        require(vaultManager.oracleRouter().getQuote(1e18, underlyingCollateralAsset, USD) != 0, "WETH -> USD oracle not working");
-        require(vaultManager.oracleRouter().getQuote(1e18, targetAsset, USD) != 0, "USDC -> USD oracle not working");
+        require(oracleRouter.getQuote(1e18, underlyingCollateralAsset, USD) != 0, "WETH -> USD oracle not working");
+        require(oracleRouter.getQuote(1e18, targetAsset, USD) != 0, "USDC -> USD oracle not working");
 
         // Check oracle prices are reasonable (not zero, not extremely high)
         if (collateralAsset == eulerWETH) {
-            uint256 wethPrice = vaultManager.oracleRouter().getQuote(1e18, underlyingCollateralAsset, USD);
+            uint256 wethPrice = oracleRouter.getQuote(1e18, underlyingCollateralAsset, USD);
             require(wethPrice > 1000e18 && wethPrice < 10000e18, "WETH price seems unreasonable");
         }
 
         if (targetAsset == USDC || targetAsset == USDS) {
-            uint256 usdcPrice = vaultManager.oracleRouter().getQuote(10**uint(IERC20(targetAsset).decimals()), targetAsset, USD);
+            uint256 usdcPrice = oracleRouter.getQuote(10**uint(IERC20(targetAsset).decimals()), targetAsset, USD);
             require(usdcPrice > 0.95e18 && usdcPrice < 1.05e18, "USDC price should be close to $1");
         }
     }
@@ -285,7 +279,7 @@ contract PostDeploymentCheck is Script {
         require(twyneLiqLTV >= 0.5e4, "Liquidation LTV too low");
 
         // Check that max liquidation LTV is higher than twyne LTV
-        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(address(intermediateVault));
+        uint256 maxLiqLTV = vaultManager.maxTwyneLTVs(address(intermediateVault), intermediateVault.asset());
         require(maxLiqLTV > twyneLiqLTV, "Max liquidation LTV should be higher than twyne LTV");
         require(maxLiqLTV <= 0.95e4, "Max liquidation LTV too high");
     }
@@ -293,7 +287,7 @@ contract PostDeploymentCheck is Script {
     /// @notice Check integration between different contracts
     function checkIntegrationBetweenContracts() internal view {
         // Check VaultManager can call OracleRouter
-        require(address(vaultManager.oracleRouter()) == address(oracleRouter), "VaultManager-OracleRouter integration broken");
+        require(address(oracleRouter) == address(oracleRouter), "VaultManager-OracleRouter integration broken");
 
         // Check CollateralVaultFactory can create vaults with proper beacons
         address beacon = collateralVaultFactory.collateralVaultBeacon(deployer_collateral_vault.targetVault());
@@ -306,7 +300,6 @@ contract PostDeploymentCheck is Script {
         require(address(collateralVaultFactory.EVC()) == address(evc), "CollateralVaultFactory-EVC integration broken");
         require(address(intermediateVault.EVC()) == address(evc), "Intermediate vault-EVC integration broken");
         require(address(deployer_collateral_vault.EVC()) == address(evc), "CollateralVault-EVC integration broken");
-        require(address(eulerWrapper.EVC()) == address(evc), "EulerWrapper-EVC integration broken");
         require(address(leverageOperator.EVC()) == address(evc), "LeverageOperator-EVC integration broken");
     }
 
@@ -322,7 +315,7 @@ contract PostDeploymentCheck is Script {
         require(intermediateVault.liquidationCoolOffTime() > 0, "Liquidation cooloff time should be positive");
 
         // Check LTV values
-        require(deployer_collateral_vault.twyneLiqLTV() <= vaultManager.maxTwyneLTVs(address(intermediateVault)), "Collateral vault LTV exceeds maximum");
+        require(deployer_collateral_vault.twyneLiqLTV() <= vaultManager.maxTwyneLTVs(address(intermediateVault), intermediateVault.asset()), "Collateral vault LTV exceeds maximum");
     }
 
     /// @notice Verify LeverageOperator configuration

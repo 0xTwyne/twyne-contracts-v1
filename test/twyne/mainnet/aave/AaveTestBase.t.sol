@@ -16,7 +16,6 @@ import {IPoolConfigurator} from "aave-v3/interfaces/IPoolConfigurator.sol";
 import {AaveV3CollateralVault, CollateralVaultBase} from "src/twyne/AaveV3CollateralVault.sol";
 import {IAaveV3ATokenWrapper} from "src/interfaces/IAaveV3ATokenWrapper.sol";
 import {AaveV3ATokenWrapperOracle} from "src/twyne/AaveV3ATokenWrapperOracle.sol";
-import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
@@ -28,12 +27,13 @@ import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {SafeERC20Lib} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
 import {BridgeHookTarget} from "src/TwyneFactory/BridgeHookTarget.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
-import {AaveV3Wrapper} from "src/Periphery/AaveV3Wrapper.sol";
+import {AssetZap} from "src/Periphery/AssetZap.sol";
+import {IVault, IERC4626} from "euler-vault-kit/EVault/IEVault.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {AaveV3LeverageOperator} from "src/operators/AaveV3LeverageOperator.sol";
 import {AaveV3DeleverageOperator} from "src/operators/AaveV3DeleverageOperator.sol";
 import {AaveV3TeleportOperator} from "src/operators/AaveV3TeleportOperator.sol";
-
+import {AssetZapFrontendHelper} from "../AssetZapFrontendHelper.sol";
 
 contract MockRewardsController {
     address token;
@@ -51,7 +51,6 @@ contract MockRewardsController {
     }
 }
 
-
 contract AaveTestBase is MainnetBase {
 
     IAaveV3ATokenWrapper aUSDCWrapper;
@@ -62,7 +61,7 @@ contract AaveTestBase is MainnetBase {
     AaveV3CollateralVault alice_aave_vault;
     AaveV3CollateralVault bob_aave_vault;
 
-    AaveV3Wrapper aaveWrapper;
+    AssetZap assetZap;
     IAaveV3DataProvider aaveDataProvider;
     AaveV3ATokenWrapperOracle aTokenWrapperOracle;
     MockRewardsController rewardsController;
@@ -75,7 +74,7 @@ contract AaveTestBase is MainnetBase {
 
     function setUp() public virtual override {
 
-        forkBlock = 24267069;
+        forkBlock = 25308678;
         forkBlockDiff = block.number - forkBlock;
 
         vm.rollFork(forkBlock);
@@ -105,8 +104,8 @@ contract AaveTestBase is MainnetBase {
         aaveEthVault = newIntermediateVaultForAave(collateralAsset, address(aaveOracleRouter), USD);
         string memory intermediate_vault_label = string.concat(IEVault(collateralAsset).symbol(), " intermediate vault");
         vm.label(address(aaveEthVault), intermediate_vault_label);
-        twyneVaultManager.setMaxLiquidationLTV(address(aaveEthVault), maxLTVInitial, 0);
-        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), externalLiqBufferInitial, 0);
+        twyneVaultManager.setMaxLiquidationLTV(address(aaveEthVault), USDC, maxLTVInitial, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(aaveEthVault), USDC, externalLiqBufferInitial, 0);
 
         twyneVaultManager.setAllowedTargetAsset(address(aaveEthVault), aavePool, USDC);
 
@@ -117,8 +116,10 @@ contract AaveTestBase is MainnetBase {
         IEVault stEthVault = newIntermediateVaultForAave(collateralAsset, address(aaveOracleRouter), USD);
         intermediate_vault_label = string.concat(IEVault(collateralAsset).symbol(), " intermediate vault");
         vm.label(address(stEthVault), intermediate_vault_label);
-        twyneVaultManager.setMaxLiquidationLTV(address(stEthVault), 9800, 0);
-        twyneVaultManager.setExternalLiqBuffer(address(stEthVault), externalLiqBufferInitial, 0);
+        twyneVaultManager.setMaxLiquidationLTV(address(stEthVault), USDC, 9800, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(stEthVault), USDC, externalLiqBufferInitial, 0);
+        twyneVaultManager.setMaxLiquidationLTV(address(stEthVault), WETH, 9800, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(stEthVault), WETH, externalLiqBufferInitial, 0);
 
         twyneVaultManager.setAllowedTargetAsset(address(stEthVault), aavePool, USDC);
         twyneVaultManager.setAllowedTargetAsset(address(stEthVault), aavePool, WETH);
@@ -157,7 +158,7 @@ contract AaveTestBase is MainnetBase {
         uint borrowLTV = getBorrowLTV(address(aWETHWrapper));
         BORROW_USD_AMOUNT = (COLLATERAL_AMOUNT) * WETH_USD_PRICE_INITIAL * (borrowLTV) / (1e4 * 1e18 * 1e12);
 
-        aaveWrapper = new AaveV3Wrapper(address(evc), WETH);
+        assetZap = new AssetZap(address(evc), eulerSwapper);
 
         // Deploy operators using the existing morpho from base test
         aaveV3LeverageOperator = new AaveV3LeverageOperator(
@@ -195,7 +196,7 @@ contract AaveTestBase is MainnetBase {
     function getReservedAssetsForAave(uint256 depositAmountWETH, AaveV3CollateralVault collateralVault) internal view returns (uint reservedAssets) {
         address collateralAsset = collateralVault.asset();
         address intermediateVault = address(collateralVault.intermediateVault());
-        uint externalLiqBuffer = uint(collateralVault.twyneVaultManager().externalLiqBuffers(intermediateVault));
+        uint externalLiqBuffer = uint(collateralVault.twyneVaultManager().externalLiqBuffers(intermediateVault, collateralVault.targetAsset()));
         uint liqLTV_twyne = collateralVault.twyneLiqLTV();
 
         uint liqLTV_external = getLiqLTV(collateralAsset) * externalLiqBuffer; // 1e8
@@ -239,8 +240,8 @@ contract AaveTestBase is MainnetBase {
         assertEq(new_vault.protocolFeeShare(), 0, "Protocol fee not zero");  // confirm zero protocol fee
 
         // add intermediate vault share price convert as price oracle
-        twyneVaultManager.setOracleResolvedVaultForOracleRouter(_oracle, address(new_vault), true);
-        twyneVaultManager.setOracleResolvedVaultForOracleRouter(_oracle, _asset, true); // need to set this for recursive resolveOracle() lookup
+        twyneVaultManager.setOracleResolvedVault(_oracle, address(new_vault), true);
+        twyneVaultManager.setOracleResolvedVault(_oracle, _asset, true); // need to set this for recursive resolveOracle() lookup
 
         address underlyingCollateralAsset = IAaveV3ATokenWrapper(_asset).asset();
         address aaveExternalOracle = getAaveOracleFeed(underlyingCollateralAsset);
@@ -327,8 +328,7 @@ contract AaveTestBase is MainnetBase {
         // Alice creates aWETH collateral vault with USDC target asset
         vm.startPrank(bob);
         bob_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: liqLTV,
@@ -363,8 +363,10 @@ contract AaveTestBase is MainnetBase {
 
         console2.log("Balance of wrapper in collateral vault pre deposit: ", aWETHWrapper.balanceOf(address(alice_aave_vault)));
         vm.startPrank(alice);
-        IERC20(WETH).approve(address(alice_aave_vault), 100000e18);
-        alice_aave_vault.depositUnderlying(100e18);
+        IERC20(WETH).approve(address(aWETHWrapper), 100e18);
+        shares = aWETHWrapper.deposit(100e18, alice);
+        aWETHWrapper.approve(address(alice_aave_vault), shares);
+        alice_aave_vault.deposit(shares);
         console2.log("Balance of wrapper in collateral vault pre borrow: ", aWETHWrapper.balanceOf(address(alice_aave_vault)));
         alice_aave_vault.borrow(100e6, address(0x1337));
         console2.log("Balance of wrapper in collateral vault pre repay: ", aWETHWrapper.balanceOf(address(alice_aave_vault)));
@@ -417,8 +419,10 @@ contract AaveTestBase is MainnetBase {
         aave_createCollateralVault(address(aWETHWrapper), 9100);
         console2.log("Balance of wrapper in collateral vault pre deposit: ", aWETHWrapper.balanceOf(address(alice_aave_vault)));
         vm.startPrank(alice);
-        IERC20(WETH).approve(address(alice_aave_vault), 100000e18);
-        alice_aave_vault.depositUnderlying(10e18);
+        IERC20(WETH).approve(address(aWETHWrapper), 10e18);
+        uint shares = aWETHWrapper.deposit(10e18, alice);
+        aWETHWrapper.approve(address(alice_aave_vault), shares);
+        alice_aave_vault.deposit(shares);
         console2.log("Balance of wrapper in collateral vault pre borrow: ", aWETHWrapper.balanceOf(address(alice_aave_vault)));
         alice_aave_vault.borrow(100e6, address(0x1337));
         console2.log("Balance of wrapper in collateral vault pre repay: ", aWETHWrapper.balanceOf(address(alice_aave_vault)));
@@ -430,8 +434,10 @@ contract AaveTestBase is MainnetBase {
         aave_bob_createCollateralVault(address(aWETHWrapper), 9100);
         console2.log("Balance of wrapper in collateral vault pre deposit: ", aWETHWrapper.balanceOf(address(bob_aave_vault)));
         vm.startPrank(bob);
-        IERC20(WETH).approve(address(bob_aave_vault), 100000e18);
-        bob_aave_vault.depositUnderlying(10e18);
+        IERC20(WETH).approve(address(aWETHWrapper), 10e18);
+        shares = aWETHWrapper.deposit(10e18, bob);
+        aWETHWrapper.approve(address(bob_aave_vault), shares);
+        bob_aave_vault.deposit(shares);
         console2.log("Balance of wrapper in collateral vault pre borrow: ", aWETHWrapper.balanceOf(address(bob_aave_vault)));
         bob_aave_vault.borrow(100e6, address(0x1337));
         console2.log("Balance of wrapper in collateral vault pre repay: ", aWETHWrapper.balanceOf(address(bob_aave_vault)));
@@ -461,8 +467,10 @@ contract AaveTestBase is MainnetBase {
 
     function aave_collateralDeposit(uint256 amount) internal {
         vm.startPrank(alice);
-        IERC20(WETH).approve(address(alice_aave_vault), type(uint).max);
-        alice_aave_vault.depositUnderlying(amount);
+        IERC20(WETH).approve(address(aWETHWrapper), type(uint).max);
+        uint shares = aWETHWrapper.deposit(amount, alice);
+        aWETHWrapper.approve(address(alice_aave_vault), shares);
+        alice_aave_vault.deposit(shares);
         vm.stopPrank();
     }
 
@@ -475,17 +483,16 @@ contract AaveTestBase is MainnetBase {
         vm.assume(isValidCollateralAsset(collateralAssets));
         uint16 minLTV = uint16(getLiqLTV(collateralAssets, debtAsset));
         address intermediateVault = intermediateVaultFor[collateralAssets];
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault, debtAsset);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault));
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault, debtAsset));
 
         aave_creditDeposit(collateralAssets);
 
         // Alice creates eWETH collateral vault with USDC target asset
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: liqLTV,
@@ -586,17 +593,11 @@ contract AaveTestBase is MainnetBase {
         // alice should have shares in her vault
         assertGt(alice_aave_vault.balanceOf(address(alice_aave_vault)), 0);
 
-        // Bob tries to deposit but reverts because depositUnderlying should be restricted to the borrower (Alice)
-        // The original test used a general `deposit` which is usually via EVC and subject to specific vault logic.
-        // For AaveV3CollateralVault, the logic is likely: deposit WETH -> get aWETHWrapper -> deposit aWETHWrapper into self.
-        // We'll test `depositUnderlying` since that's what's used in `test_aave_single_flow`.
+        // Bob (non-borrower) attempts to deposit into Alice's vault; reverts since only the borrower may deposit.
         vm.startPrank(bob);
         IERC20(WETH).approve(address(alice_aave_vault), type(uint).max);
-        // It should revert because the AaveV3CollateralVault's `depositUnderlying` may restrict deposits to the borrower.
-        // Assuming it will revert with a general error or one specific to the underlying EVault/Twyne logic if not borrower.
-        // Since `test_aave_single_flow` uses `depositUnderlying`, and the Aave collateral vault is designed for one user:
         vm.expectRevert(TwyneErrors.ReceiverNotBorrower.selector);
-        alice_aave_vault.depositUnderlying(COLLATERAL_AMOUNT);
+        alice_aave_vault.deposit(COLLATERAL_AMOUNT);
         vm.stopPrank();
     }
 
@@ -618,7 +619,7 @@ contract AaveTestBase is MainnetBase {
         uint256 oneEther = 10 ** uint256(IERC20(collateralAssets).decimals());
 
         // Some shared logic with test_e_maxBorrowFromEulerDirect()
-        alice_aave_vault.setTwyneLiqLTV(liqLTV * uint(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault()))) / MAXFACTOR);
+        alice_aave_vault.setTwyneLiqLTV(liqLTV * uint(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset())) / MAXFACTOR);
 
         IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
         // reserve assets from intermediate vault
@@ -642,7 +643,7 @@ contract AaveTestBase is MainnetBase {
         vm.startPrank(bob);
         IERC20(WETH).approve(address(alice_aave_vault), type(uint).max);
         vm.expectRevert(TwyneErrors.ReceiverNotBorrower.selector);
-        alice_aave_vault.depositUnderlying(1);
+        alice_aave_vault.deposit(1);
         vm.stopPrank();
 
         uint aliceUSDCBalanceAfter = IERC20(USDC).balanceOf(alice);
@@ -806,32 +807,6 @@ contract AaveTestBase is MainnetBase {
     }
 
 
-
-    // Deposit WETH instead of eWETH into Twyne
-    // This allows users to bypass the Euler Finance frontend entirely
-    function aave_collateralDepositUnderlying(address collateralAssets) public noGasMetering {
-        // 1. Setup liquidity and create vault
-        aave_createCollateralVault(collateralAssets, 9100);
-
-        vm.startPrank(alice);
-        assertEq(alice_aave_vault.borrower(), alice);
-
-        // 2. Alice approves underlying asset to the vault
-        address underlyingAsset = IAaveV3ATokenWrapper(collateralAssets).asset();
-        IERC20(underlyingAsset).approve(address(alice_aave_vault), type(uint).max);
-
-        // 3. Deposit WETH (underlying) directly into the collateral vault
-        // AaveV3CollateralVault handles wrapping WETH -> aWETHWrapper and depositing
-        alice_aave_vault.depositUnderlying(COLLATERAL_AMOUNT);
-
-        vm.stopPrank();
-
-        // Assertions: The vault should hold wrapped tokens (aWETHWrapper)
-        assertGt(alice_aave_vault.balanceOf(address(alice_aave_vault)), 0, "Alice did not receive shares");
-        assertApproxEqAbs(IAaveV3ATokenWrapper(collateralAssets).convertToAssets(alice_aave_vault.totalAssetsDepositedOrReserved() - alice_aave_vault.maxRelease()), COLLATERAL_AMOUNT, 1, "Total assets mismatch");
-    }
-
-
     // Test Permit2 deposit of aWETHWrapper (wrapped collateral)
     function aave_permit2CollateralDeposit(address collateralAssets) public noGasMetering {
         aave_creditDeposit(collateralAssets);
@@ -844,8 +819,7 @@ contract AaveTestBase is MainnetBase {
 
         // 1. User creates an Aave vault
         AaveV3CollateralVault user_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[wrappedCollateral],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -908,75 +882,6 @@ contract AaveTestBase is MainnetBase {
     }
 
 
-    // Test Permit2 deposit of WETH (not eWETH)
-    // Test Permit2 deposit of WETH (underlying collateral)
-    function aave_permit2_CollateralDepositUnderlying(address collateralAssets) public noGasMetering {
-        aave_creditDeposit(collateralAssets);
-
-        (address user, uint privKey) = makeAddrAndKey("permit2user");
-        address underlyingAsset = IAaveV3ATokenWrapper(collateralAssets).asset();
-
-        vm.startPrank(user);
-
-        // 1. User creates an Aave vault
-        AaveV3CollateralVault user_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
-                _intermediateVault: intermediateVaultFor[collateralAssets],
-                _targetVault: aavePool,
-                _liqLTV: twyneLiqLTV,
-                _targetAsset: USDC
-            })
-        );
-
-        vm.expectRevert();
-        user_aave_vault.deposit(uint160(COLLATERAL_AMOUNT));
-
-
-        // 2. Give the user the underlying asset (WETH)
-        deal(underlyingAsset, user, INITIAL_DEALT_ERC20);
-
-        // 3. User approves Permit2 to spend the underlying WETH
-        IERC20(underlyingAsset).approve(permit2, type(uint).max);
-
-        // 4. Create Permit2 signature for WETH
-        IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
-            details: IAllowanceTransfer.PermitDetails({
-                token: underlyingAsset,
-                amount: uint160(COLLATERAL_AMOUNT),
-                expiration: type(uint48).max,
-                nonce: 0
-            }),
-            spender: address(user_aave_vault),
-            sigDeadline: type(uint256).max
-        });
-
-        Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
-
-        // 5. Build a deposit batch with Permit2
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
-        items[0].targetContract = permit2;
-        items[0].onBehalfOfAccount = user;
-        items[0].value = 0;
-        items[0].data = abi.encodeWithSignature(
-            "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
-            user,
-            permitSingle,
-            permit2Signer.signPermitSingle(privKey, permitSingle)
-        );
-
-        // 6. Deposit WETH via the vault's depositUnderlying function
-        items[1].targetContract = address(user_aave_vault);
-        items[1].onBehalfOfAccount = user;
-        items[1].value = 0;
-        items[1].data = abi.encodeCall(user_aave_vault.depositUnderlying, (COLLATERAL_AMOUNT));
-
-        evc.batch(items);
-        vm.stopPrank();
-
-    }
-
-
     // Test the creation of a collateral vault in a batch (the frontend does this)
     // Test the creation of an Aave collateral vault in a batch
     function aave_evcCanCreateCollateralVault(address collateralAssets) public noGasMetering {
@@ -990,7 +895,7 @@ contract AaveTestBase is MainnetBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.AAVE_V3, intermediateVaultFor[collateralAssets], aavePool, twyneLiqLTV, USDC))
+            data: abi.encodeCall(collateralVaultFactory.createAaveV3CollateralVault, (intermediateVaultFor[collateralAssets], aavePool, twyneLiqLTV, USDC))
         });
 
         // 1. Simulate the batch to get the expected vault address
@@ -1275,8 +1180,7 @@ contract AaveTestBase is MainnetBase {
         // 2. Bob creates vault
         vm.startPrank(bob);
         bob_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAssets],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1307,7 +1211,7 @@ contract AaveTestBase is MainnetBase {
 
         vm.startPrank(alice);
         // Toggle LTV before any borrows exist
-        uint16 newLTV = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault())) - 100;
+        uint16 newLTV = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset()) - 100;
         alice_aave_vault.setTwyneLiqLTV(newLTV);
 
         // Assert the change took place
@@ -1329,13 +1233,12 @@ contract AaveTestBase is MainnetBase {
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         alice_aave_vault.setTwyneLiqLTV(1e4);
 
-        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()));
+        uint16 cachedMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset());
         alice_aave_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 50);
         alice_aave_vault.setTwyneLiqLTV(cachedMaxTwyneLTV - 100);
         alice_aave_vault.setTwyneLiqLTV(cachedMaxTwyneLTV);
         vm.stopPrank();
     }
-
 
     // Test the helper function used to get liquidity into the intermediate vault
     function aave_depositUnderlyingToIntermediateVault(address collateralAssets) public {
@@ -1355,97 +1258,113 @@ contract AaveTestBase is MainnetBase {
         uint256 snapshot = vm.snapshotState();
 
         // TEST 1: Direct call with plain approval
-        vm.startPrank(alice);
+        uint256 sharesReceived;
+        {
+            vm.startPrank(alice);
 
-        // Set up plain ERC20 approval for the Aave Wrapper
-        IERC20(underlyingAsset).approve(address(aaveWrapper), depositAmount);
+            // Set up plain ERC20 approval for the AssetZap
+            IERC20(underlyingAsset).approve(address(assetZap), depositAmount);
 
-        // Record balances before
-        uint256 aliceUnderlyingBefore = IERC20(underlyingAsset).balanceOf(alice);
-        uint256 aliceIntermediateSharesBefore = intermediateVault.balanceOf(alice);
+            // Record balances before
+            uint256 aliceUnderlyingBefore = IERC20(underlyingAsset).balanceOf(alice);
+            uint256 aliceIntermediateSharesBefore = intermediateVault.balanceOf(alice);
 
-        // Call the function directly on the Aave Wrapper
-        uint256 sharesReceived = aaveWrapper.depositUnderlyingToIntermediateVault(
-            intermediateVault,
-            depositAmount
-        );
+            // Call zap on the AssetZap, then skim to mint IV shares to alice.
+            assetZap.zapUnderlying(underlyingAsset, depositAmount, address(intermediateVault), 0);
+            sharesReceived = intermediateVault.skim(type(uint).max, alice);
 
-        vm.stopPrank();
+            vm.stopPrank();
 
-        // Verify results for direct call
-        assertEq(IERC20(underlyingAsset).balanceOf(alice), aliceUnderlyingBefore - depositAmount, "Alice underlying balance incorrect");
-        assertApproxEqAbs(intermediateVault.balanceOf(alice), aliceIntermediateSharesBefore + sharesReceived, 1e2, "Alice intermediate shares incorrect");
-        assertApproxEqAbs(IERC20(underlyingAsset).balanceOf(address(aWETHWrapper)), 0, 10, "Wrapper should not hold underlying");
-        assertApproxEqAbs(IERC20(collateralAssets).balanceOf(address(aWETHWrapper)), 0, 10, "Wrapper should not hold aTokens");
-        assertGt(sharesReceived, 0, "Should receive some shares");
+            // Verify results for direct call
+            assertEq(IERC20(underlyingAsset).balanceOf(alice), aliceUnderlyingBefore - depositAmount, "Alice underlying balance incorrect");
+            assertApproxEqAbs(intermediateVault.balanceOf(alice), aliceIntermediateSharesBefore + sharesReceived, 1e2, "Alice intermediate shares incorrect");
+            assertApproxEqAbs(IERC20(underlyingAsset).balanceOf(address(aWETHWrapper)), 0, 10, "AssetZap should not hold underlying");
+            assertApproxEqAbs(IERC20(collateralAssets).balanceOf(address(aWETHWrapper)), 0, 10, "AssetZap should not hold aTokens");
+            assertGt(sharesReceived, 0, "Should receive some shares");
+        }
 
         // Revert to snapshot for batch test
         vm.revertToState(snapshot);
 
         // TEST 2: Batch call with permit2
-        vm.startPrank(alice);
+        uint256 sharesReceivedBatch;
+        {
+            vm.startPrank(alice);
 
-        // First approve permit2 to spend the tokens
-        IERC20(underlyingAsset).approve(permit2, type(uint256).max);
+            // First approve permit2 to spend the tokens
+            IERC20(underlyingAsset).approve(permit2, type(uint256).max);
 
-        // Create permit2 signature
-        Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
-        IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
-            details: IAllowanceTransfer.PermitDetails({
-                token: underlyingAsset,
-                amount: uint160(depositAmount),
-                expiration: type(uint48).max,
-                nonce: 0
-            }),
-            spender: address(aaveWrapper),
-            sigDeadline: type(uint256).max
-        });
+            // Record balances before batch
+            uint256 aliceUnderlyingBeforeBatch = IERC20(underlyingAsset).balanceOf(alice);
+            uint256 aliceIntermediateSharesBeforeBatch = intermediateVault.balanceOf(alice);
 
-        // Record balances before batch
-        uint256 aliceUnderlyingBeforeBatch = IERC20(underlyingAsset).balanceOf(alice);
-        uint256 aliceIntermediateSharesBeforeBatch = intermediateVault.balanceOf(alice);
+            // Build + execute batch (separate function to avoid stack-too-deep from 5-arg abi.encodeCall)
+            _permit2DepositBatch(alice, underlyingAsset, depositAmount, intermediateVault);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+            // Calculate sharesReceived by checking balance difference
+            sharesReceivedBatch = intermediateVault.balanceOf(alice) - aliceIntermediateSharesBeforeBatch;
+
+            vm.stopPrank();
+
+            // Verify results for batch call
+            assertEq(IERC20(underlyingAsset).balanceOf(alice), aliceUnderlyingBeforeBatch - depositAmount, "Alice underlying balance incorrect in batch");
+            assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBeforeBatch + sharesReceivedBatch, "Alice intermediate shares incorrect in batch");
+            assertEq(IERC20(underlyingAsset).balanceOf(address(assetZap)), 0, "AssetZap should not hold underlying in batch");
+            assertEq(IEVault(collateralAssets).balanceOf(address(assetZap)), 0, "AssetZap should not hold euler shares in batch");
+            assertGt(sharesReceivedBatch, 0, "Should receive some shares in batch");
+        }
+
+        // Both tests should yield the same amount of shares
+        assertEq(sharesReceived, sharesReceivedBatch, "Direct and batch calls should yield same shares");
+    }
+
+    function _permit2DepositBatch(address alice, address underlyingAsset, uint256 depositAmount, IEVault intermediateVault) internal {
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
 
         // 1. Permit2 call
-        items[0] = IEVC.BatchItem({
-            targetContract: permit2,
+        {
+            Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
+            IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
+                details: IAllowanceTransfer.PermitDetails({
+                    token: underlyingAsset,
+                    amount: uint160(depositAmount),
+                    expiration: type(uint48).max,
+                    nonce: 0
+                }),
+                spender: address(assetZap),
+                sigDeadline: type(uint256).max
+            });
+            items[0] = IEVC.BatchItem({
+                targetContract: permit2,
+                onBehalfOfAccount: alice,
+                value: 0,
+                data: abi.encodeWithSignature(
+                    "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
+                    alice,
+                    permitSingle,
+                    permit2Signer.signPermitSingle(aliceKey, permitSingle)
+                )
+            });
+        }
+
+        // 2. zap: deposit underlying into the IV's wrapper, minting wrapper shares to the IV
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeWithSignature(
-                "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
-                alice,
-                permitSingle,
-                permit2Signer.signPermitSingle(aliceKey, permitSingle)
-            )
+            data: abi.encodeCall(AssetZap.zapUnderlying, (underlyingAsset, depositAmount, address(intermediateVault), 0))
         });
 
-        // 2. depositUnderlyingToIntermediateVault call
-        items[1] = IEVC.BatchItem({
-            targetContract: address(aaveWrapper),
+        // 3. skim: the IV deposits its wrapper shares and mints IV shares to alice
+        items[2] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(aaveWrapper.depositUnderlyingToIntermediateVault, (intermediateVault, depositAmount))
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
         });
 
         // Execute batch
         evc.batch(items);
-
-        // Calculate sharesReceived by checking balance difference
-        uint256 aliceIntermediateSharesAfterBatch = intermediateVault.balanceOf(alice);
-        uint256 sharesReceivedBatch = aliceIntermediateSharesAfterBatch - aliceIntermediateSharesBeforeBatch;
-
-        vm.stopPrank();
-
-        // Verify results for batch call
-        assertEq(IERC20(underlyingAsset).balanceOf(alice), aliceUnderlyingBeforeBatch - depositAmount, "Alice underlying balance incorrect in batch");
-        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBeforeBatch + sharesReceivedBatch, "Alice intermediate shares incorrect in batch");
-        assertEq(IERC20(underlyingAsset).balanceOf(address(aaveWrapper)), 0, "Wrapper should not hold underlying in batch");
-        assertEq(IEVault(collateralAssets).balanceOf(address(aaveWrapper)), 0, "Wrapper should not hold euler shares in batch");
-        assertGt(sharesReceivedBatch, 0, "Should receive some shares in batch");
-
-        // Both tests should yield the same amount of shares
-        assertEq(sharesReceived, sharesReceivedBatch, "Direct and batch calls should yield same shares");
     }
 
     // Test that if time passes, user can withdraw all their share of the collateral
@@ -1522,7 +1441,7 @@ contract AaveTestBase is MainnetBase {
 
         vm.startPrank(admin);
         // Set an External Liq Buffer (Twyne's safety margin)
-        twyneVaultManager.setExternalLiqBuffer(address(alice_aave_vault.intermediateVault()), 0.95e4, 0); // 96%
+        twyneVaultManager.setExternalLiqBuffer(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset(), 0.95e4, 0); // 96%
         vm.stopPrank();
         uint snapshot = vm.snapshotState();
 
@@ -1570,7 +1489,7 @@ contract AaveTestBase is MainnetBase {
 
         vm.startPrank(admin);
         // Reset External Liq Buffer (to ensure the *Aave Health Factor* check triggers next)
-        twyneVaultManager.setExternalLiqBuffer(address(alice_aave_vault.intermediateVault()), uint16(MAXFACTOR), 0); // 100% buffer
+        twyneVaultManager.setExternalLiqBuffer(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset(), uint16(MAXFACTOR), 0); // 100% buffer
         vm.stopPrank();
 
         vm.startPrank(alice);
@@ -1680,85 +1599,6 @@ contract AaveTestBase is MainnetBase {
         assertApproxEqRel(IERC20(collateralAssets).balanceOf(alice), IEVault(collateralAssets).convertToShares(INITIAL_DEALT_ETOKEN), 1, "wstETH balance is not the original amount");
     }
 
-
-    function aave_depositETHToIntermediateVault(address collateralAssets) public {
-        vm.assume(isValidCollateralAsset(collateralAssets));
-        // Only test with WETH-based assets since ETH deposits only work with WETH
-        address underlyingAsset = IEVault(collateralAssets).asset();
-
-        uint256 ethDepositAmount = 1 ether;
-        vm.deal(alice, ethDepositAmount);
-
-        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAssets]);
-
-
-        if (underlyingAsset != WETH) {
-            // Test that depositETHToIntermediateVault reverts when used with non-WETH underlying
-            vm.expectRevert(TwyneErrors.OnlyWETH.selector);
-            aaveWrapper.depositETHToIntermediateVault{value: 1e18}(intermediateVault);
-            vm.stopPrank();
-            return;
-        }
-
-
-        uint256 snapshot = vm.snapshotState();
-
-        // TEST 1: Direct call
-        vm.startPrank(alice);
-
-        uint256 aliceETHBefore = alice.balance;
-        uint256 aliceIntermediateSharesBefore = intermediateVault.balanceOf(alice);
-
-        // Call the function on the Aave Wrapper, sending ETH
-        uint256 sharesReceived = aaveWrapper.depositETHToIntermediateVault{value: ethDepositAmount}(
-            intermediateVault
-        );
-
-        vm.stopPrank();
-
-        // Verification
-        assertEq(alice.balance, aliceETHBefore - ethDepositAmount, "Alice ETH balance incorrect");
-        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBefore + sharesReceived, "Alice intermediate shares incorrect");
-        assertEq(IERC20(WETH).balanceOf(address(aaveWrapper)), 0, "Wrapper should not hold WETH");
-        assertEq(address(aaveWrapper).balance, 0, "Wrapper should not hold ETH");
-        assertEq(IEVault(collateralAssets).balanceOf(address(aaveWrapper)), 0, "Wrapper should not hold wrapper shares");
-        assertGt(sharesReceived, 0, "Should receive some shares");
-
-        vm.revertToState(snapshot);
-
-        // TEST 2: Batch call through EVC
-        vm.startPrank(alice);
-
-        uint256 aliceETHBeforeBatch = alice.balance;
-        uint256 aliceIntermediateSharesBeforeBatch = intermediateVault.balanceOf(alice);
-
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
-
-        // ETH deposit function on AaveWrapper
-        items[0] = IEVC.BatchItem({
-            targetContract: address(aaveWrapper),
-            onBehalfOfAccount: alice,
-            value: ethDepositAmount,
-            data: abi.encodeCall(aaveWrapper.depositETHToIntermediateVault, (intermediateVault))
-        });
-
-        // The ETH value must be sent with the EVC batch call
-        evc.batch{value: ethDepositAmount}(items);
-
-        uint256 aliceIntermediateSharesAfterBatch = intermediateVault.balanceOf(alice);
-        uint256 sharesReceivedBatch = aliceIntermediateSharesAfterBatch - aliceIntermediateSharesBeforeBatch;
-
-        vm.stopPrank();
-
-        // Verification for batch call
-        assertEq(alice.balance, aliceETHBeforeBatch - ethDepositAmount, "Alice ETH balance incorrect in batch");
-        assertEq(intermediateVault.balanceOf(alice), aliceIntermediateSharesBeforeBatch + sharesReceivedBatch, "Alice intermediate shares incorrect in batch");
-        assertEq(address(aaveWrapper).balance, 0, "Wrapper should not hold ETH in batch");
-        assertGt(sharesReceivedBatch, 0, "Should receive some shares in batch");
-
-        // Both tests should yield approximately the same amount of shares
-        assertEq(sharesReceived, sharesReceivedBatch, "Direct and batch calls should yield approximately same shares");
-    }
 
 
     // TODO Test the scenario where one user is a credit LP and a borrower at the same time

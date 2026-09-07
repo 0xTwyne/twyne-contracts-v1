@@ -7,7 +7,6 @@ import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {AaveV3CollateralVault} from "src/twyne/AaveV3CollateralVault.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
-import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {AaveTestBase} from "./AaveTestBase.t.sol";
 import {console2} from "forge-std/console2.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
@@ -55,16 +54,15 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         // Pre-setup checks
         uint16 minLTV = uint16(getLiqLTV(address(aWETHWrapper), USDC));
         address intermediateVault = intermediateVaultFor[address(aWETHWrapper)];
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault, USDC);
         require(uint256(minLTV) * uint256(extLiqBuffer) <= uint256(twyneLTV) * MAXFACTOR, "precond fail");
-        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault), "twyneLTV too high");
+        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault, USDC), "twyneLTV too high");
 
         aave_creditDeposit(address(aWETHWrapper));
 
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLTV,
@@ -211,7 +209,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
         ( , uint256 totalDebtBase, , , , ) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
         data.B_left = totalDebtBase;
         
-        data.max_liqLTV_t = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()));
+        data.max_liqLTV_t = twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset());
         
         data.C_left_USD = uint(aWETHWrapper.latestAnswer()) * data.C_left / 1e18;
         
@@ -268,7 +266,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     // --- Tests ---
 
     function test_a_handleExternalLiquidation_case00() external noGasMetering {
-        createInitialPosition(5e18, 0, 12000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8500);
         executePriceDrop(32);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(50); 
@@ -279,7 +277,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     }
 
     function test_a_handleExternalLiquidation_case01() external noGasMetering {
-        createInitialPosition(5e18, 0, 12000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
         executePriceDrop(35);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(20); 
@@ -291,7 +289,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     }
 
     function test_a_handleExternalLiquidation_case10() external noGasMetering {
-        createInitialPosition(5e18, 5e18, 12000e6, 9000);
+        createInitialPosition(5e18, 5e18, BORROW_USD_AMOUNT, 9000);
         executePriceDrop(35);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(15); 
@@ -361,7 +359,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     }
 
     function test_a_expectRevert_handleExternalLiquidation_NotExternallyLiquidated() external noGasMetering {
-        createInitialPosition(5e18, 0, 12000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8500);
         vm.startPrank(alice);
         vm.expectRevert(TwyneErrors.NotExternallyLiquidated.selector);
         evc.call({
@@ -374,7 +372,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     }
 
     function test_a_expectRevert_handleExternalLiquidation_ExternalPositionUnhealthy() external noGasMetering {
-        createInitialPosition(5e18, 0, 12000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8500);
         executePriceDrop(32);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(5);
@@ -390,7 +388,7 @@ contract AaveTestPostFallbackAccounting is AaveTestBase {
     }
 
     function test_a_expectRevert_handleExternalLiquidation_NoLiquidationForZeroReserve() external noGasMetering {
-        createInitialPosition(5e18, 0, 12000e6, 8300);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8300);
         executePriceDrop(32);
         setup_approve_customSetup();
         executeExternalLiquidationWithPartialRepay(40);

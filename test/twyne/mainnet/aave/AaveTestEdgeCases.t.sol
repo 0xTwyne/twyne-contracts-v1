@@ -16,7 +16,8 @@ import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
 import {Events} from "euler-vault-kit/EVault/shared/Events.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
-import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {AaveV3ATokenWrapperOracle} from "src/twyne/AaveV3ATokenWrapperOracle.sol";
+import {PauseState} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {MockAaveFeed} from "test/mocks/MockAaveFeed.sol";
 import {Errors as AaveErrors} from "aave-v3/protocol/libraries/helpers/Errors.sol";
@@ -39,8 +40,17 @@ contract AaveLiqCollateralVault is AaveV3CollateralVault {
     }
 
     function collateralScaledByLiqLTV1e8() external view returns (uint) {
-        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault))) * _getExtLiqLTV();
-        return _collateralScaledByLiqLTV1e8(false, adjExtLiqLTV);
+        (uint buffer, uint maxTwyneLiqLTV,) = twyneVaultManager.liqParams(address(intermediateVault), targetAsset);
+        uint adjExtLiqLTV = buffer * _getExtLiqLTV();
+        return _collateralScaledByLiqLTV1e8(false, adjExtLiqLTV, maxTwyneLiqLTV, maxRelease());
+    }
+
+    function getTenPowAssetDecimals() external view returns (uint) {
+        return tenPowAssetDecimals;
+    }
+
+    function getTenPowVAssetDecimals() external view returns (uint) {
+        return tenPowVAssetDecimals;
     }
 }
 
@@ -54,9 +64,9 @@ contract AaveTestEdgeCases is AaveTestBase {
         address collateral = address(aWETHWrapper);
         uint16 minLTV = uint16(getLiqLTV(collateral));
         address intermediateVault = intermediateVaultFor[collateral];
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault, USDC);
         vm.assume(uint(minLTV) * uint(extLiqBuffer) <= uint256(liqLTV) * MAXFACTOR);
-        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault));
+        vm.assume(liqLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault, USDC));
         // Bob deposits into aaveEthVault to earn boosted yield
         vm.startPrank(bob);
         IERC20(collateral).approve(address(aaveEthVault), type(uint256).max);
@@ -66,8 +76,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // repeat but for Collateral non-EVK vault
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateral],
                 _targetVault: aavePool,
                 _liqLTV: liqLTV,
@@ -105,7 +114,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         (,,uint availableBorrowsBase,,,) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
         availableBorrowsBase = availableBorrowsBase/1e2;
         console2.log("Available borrow base init: ", availableBorrowsBase);
-        uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault()))) * availableBorrowsBase / MAXFACTOR;
+        uint256 borrowAmountUSD1 = uint256(twyneVaultManager.externalLiqBuffers(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset())) * availableBorrowsBase / MAXFACTOR;
 
         uint USDCPrice = getAavePrice(USDC); // returns a value times 1e10
 
@@ -155,7 +164,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         vm.stopPrank();
 
                 // Put the vault into a liquidatable state
-        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault)) < 0.975e4) {
+        if (twyneVaultManager.externalLiqBuffers(address(aaveEthVault), USDC) < 0.975e4) {
             // If safety buffer is not very high, can warp forward a small amount to achieve a liquidatable position
             vm.warp(block.timestamp + 600); // accrue interest
         } else {
@@ -169,6 +178,99 @@ contract AaveTestEdgeCases is AaveTestBase {
             mockFeed = MockAaveFeed(feed);
             mockFeed.setPrice(initPrice*930/1000);
         }
+    }
+
+    function aave_externalLiquidateAliceVault() internal {
+        vm.warp(block.timestamp + 1);
+
+        dealWrapperToken(address(aWETHWrapper), liquidator, 100 ether);
+        deal(USDC, liquidator, alice_aave_vault.maxRepay() + 1_000_000);
+
+        vm.startPrank(liquidator);
+        IERC20(USDC).approve(aavePool, type(uint).max);
+        IEVC(alice_aave_vault.EVC()).enableCollateral(liquidator, address(aWETHWrapper));
+
+        assertFalse(alice_aave_vault.isExternallyLiquidated());
+        assertGt(alice_aave_vault.maxRepay(), 0);
+
+        IAaveV3Pool(aavePool).liquidationCall({
+            collateralAsset: WETH,
+            debtAsset: USDC,
+            borrower: address(alice_aave_vault),
+            debtToCover: type(uint).max,
+            receiveAToken: false
+        });
+        vm.stopPrank();
+
+        assertTrue(alice_aave_vault.isExternallyLiquidated(), "collateral vault was not externally liquidated");
+    }
+
+    function drainAaveEthVaultToFullUtilization() internal {
+        uint amountToWithdraw = aWETHWrapper.balanceOf(address(aaveEthVault));
+        vm.prank(bob);
+        aaveEthVault.withdraw(amountToWithdraw, bob, bob);
+        assertEq(aWETHWrapper.balanceOf(address(aaveEthVault)), 0, "Not at full utilisation");
+    }
+
+    function handleExternalLiquidationFromNewLiquidator() internal returns (address newLiquidator, uint liquidatorReward) {
+        newLiquidator = makeAddr("newLiquidator");
+        vm.startPrank(newLiquidator);
+
+        uint sharesToBurn = alice_aave_vault.totalAssetsDepositedOrReserved() - IAaveV3AToken(aWETHWrapper.aToken()).scaledBalanceOf(address(alice_aave_vault));
+        uint amountToSplit = aWETHWrapper.balanceOf(address(alice_aave_vault)) - sharesToBurn;
+
+        uint amountToRepay = alice_aave_vault.maxRepay();
+        uint maxRelease = alice_aave_vault.maxRelease();
+
+        (liquidatorReward, , ) = splitCollateralAfterExtLiq(amountToSplit, amountToRepay, maxRelease);
+
+        deal(USDC, newLiquidator, amountToRepay);
+
+        IERC20(USDC).approve(address(alice_aave_vault), type(uint).max);
+
+        assertGt(liquidatorReward, 0, "Liquidator reward should be greater than 0");
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            onBehalfOfAccount: newLiquidator,
+            targetContract: address(alice_aave_vault),
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.handleExternalLiquidation, ())
+        });
+
+        evc.batch(items);
+
+        vm.stopPrank();
+    }
+
+    function liquidateAndRepayAsLiquidator() internal {
+        dealWrapperToken(address(aWETHWrapper), liquidator, 100 ether);
+        deal(USDC, liquidator, alice_aave_vault.maxRepay() + 1_000_000);
+
+        vm.startPrank(liquidator);
+        IERC20(address(aWETHWrapper)).approve(address(alice_aave_vault), type(uint).max);
+        IERC20(USDC).approve(address(alice_aave_vault), type(uint).max);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.liquidate, ())
+        });
+
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_aave_vault),
+            onBehalfOfAccount: liquidator,
+            value: 0,
+            data: abi.encodeCall(alice_aave_vault.repay, (type(uint).max))
+        });
+
+        evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(alice_aave_vault.borrower(), liquidator);
+        assertFalse(alice_aave_vault.canLiquidate());
     }
 
     function test_invalid_withdraw() public {
@@ -207,8 +309,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         vm.startPrank(alice);
         // Alice creates another vault with same params
         AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -238,6 +339,11 @@ contract AaveTestEdgeCases is AaveTestBase {
         uint collateralValue = uint(aWETHWrapper.latestAnswer()) * aWETHWrapper.balanceOf(address(alice_aave_vault)) / tenPowDecimals;
 
         assertApproxEqAbs(totalCollateralBase, collateralValue, 10, "Incorrect values from latest answer");
+
+        assertTrue(aTokenWrapperOracle.isAssetSupported(address(aWETHWrapper)));
+        AaveV3ATokenWrapperOracle wrongDecimalsOracle = new AaveV3ATokenWrapperOracle(18, aavePool);
+        vm.expectRevert(TwyneErrors.T_FeedDecimalsNotCorrect.selector);
+        wrongDecimalsOracle.isAssetSupported(address(aWETHWrapper));
     }
 
     // Test case where user tries to create a collateral vault with a config that is not allowed
@@ -247,10 +353,9 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Try creating a collateral vault with a disallowed collateral asset
         vm.startPrank(alice);
-        vm.expectRevert(TwyneErrors.IntermediateVaultNotSet.selector);
+        vm.expectRevert(TwyneErrors.NotIntermediateVault.selector);
         AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aUSDCWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -261,8 +366,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Try creating a collateral vault with a disallowed target asset
         vm.expectRevert(TwyneErrors.NotIntermediateVault.selector);
         AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -280,20 +384,20 @@ contract AaveTestEdgeCases is AaveTestBase {
         vm.startPrank(alice);
 
         // cannot transferFrom from vault
-        vm.expectRevert(TwyneErrors.T_CV_OperationDisabled.selector);
+        vm.expectRevert();
         IERC20(address(alice_aave_vault)).transferFrom(address(alice_aave_vault), alice, 1 ether);
 
         // cannot transfer to eve
-        vm.expectRevert(TwyneErrors.T_CV_OperationDisabled.selector);
+        vm.expectRevert();
         IERC20(address(alice_aave_vault)).transfer(eve, 1 ether);
 
         // this approve() does nothing because alice never holds vault shares directly
-        vm.expectRevert(TwyneErrors.T_CV_OperationDisabled.selector);
+        vm.expectRevert();
         IERC20(address(alice_aave_vault)).approve(eve, 1 ether);
         vm.stopPrank();
 
         vm.startPrank(eve);
-        vm.expectRevert(TwyneErrors.T_CV_OperationDisabled.selector);
+        vm.expectRevert();
         IERC20(address(alice_aave_vault)).transferFrom(alice, eve, 1 ether);
         vm.stopPrank();
     }
@@ -355,8 +459,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -380,19 +483,16 @@ contract AaveTestEdgeCases is AaveTestBase {
         vm.startPrank(alice);
         IERC20(WETH).approve(address(alice_aave_vault), type(uint).max);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        alice_aave_vault.depositUnderlying(INITIAL_DEALT_ERC20 / 2);
-        vm.expectRevert(Pausable.EnforcedPause.selector);
         alice_aave_vault.deposit(INITIAL_DEALT_ERC20 / 4);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         alice_aave_vault.skim();
-        // withdraw is blocked because of the automatic rebalancing on the intermediate vault, which is paused
-        vm.expectRevert(Errors.E_OperationDisabled.selector);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         alice_aave_vault.withdraw(1 ether, alice);
         vm.stopPrank();
 
         // Unpause the Twyne protocol
         vm.startPrank(admin);
-        collateralVaultFactory.unpause();
+        collateralVaultFactory.setPauseState(PauseState.Active);
         vm.stopPrank();
 
         // Unpause the intermediate vault by returning the original setHookConfig settings
@@ -425,6 +525,223 @@ contract AaveTestEdgeCases is AaveTestBase {
         });
 
         evc.batch(items);
+        vm.stopPrank();
+    }
+
+    // Pause blocks repay() on the collateral vault.
+    function test_aave_pause_blocksRepay() public noGasMetering {
+        aave_firstBorrowViaCollateral(address(aWETHWrapper));
+
+        vm.prank(admin);
+        collateralVaultFactory.pause();
+
+        vm.startPrank(alice);
+        IERC20(USDC).approve(address(alice_aave_vault), type(uint).max);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.repay(1);
+        vm.stopPrank();
+    }
+
+    // Pause blocks withdraw() on the collateral vault.
+    function test_aave_pause_blocksWithdraw() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+
+        vm.prank(admin);
+        collateralVaultFactory.pause();
+
+        vm.startPrank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.withdraw(1, alice);
+        vm.stopPrank();
+    }
+
+    // Pause blocks redeemUnderlying() on the collateral vault.
+    function test_aave_pause_blocksRedeemUnderlying() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+
+        vm.prank(admin);
+        collateralVaultFactory.pause();
+
+        vm.startPrank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.redeemUnderlying(1, alice);
+        vm.stopPrank();
+    }
+
+    // Pause blocks liquidate() on a genuinely liquidatable collateral vault.
+    function test_aave_pause_blocksLiquidate() public noGasMetering {
+        aave_setupCompleteExternalLiquidation();
+        assertTrue(alice_aave_vault.canLiquidate(), "Vault should be liquidatable");
+
+        vm.prank(admin);
+        collateralVaultFactory.pause();
+
+        vm.startPrank(liquidator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.liquidate();
+        vm.stopPrank();
+    }
+
+    // Pause blocks rebalance() on the collateral vault.
+    function test_aave_pause_blocksRebalance() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+        vm.warp(block.timestamp + 1000);
+
+        vm.prank(admin);
+        collateralVaultFactory.pause();
+
+        // Anyone can call rebalance; use eve to show permissionless path is still blocked.
+        vm.prank(eve);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.rebalance();
+    }
+
+    // Pause blocks handleExternalLiquidation() after the Aave position has actually been externally liquidated.
+    function test_aave_pause_blocksHandleExternalLiquidation() public noGasMetering {
+        aave_setupCompleteExternalLiquidation();
+        aave_externalLiquidateAliceVault();
+
+        vm.prank(admin);
+        collateralVaultFactory.pause();
+
+        vm.prank(liquidator);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.handleExternalLiquidation();
+    }
+
+    // Freeze allows repay() so borrowers can deleverage existing positions during wind-down.
+    function test_aave_freeze_allowsRepay() public noGasMetering {
+        aave_firstBorrowViaCollateral(address(aWETHWrapper));
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        vm.startPrank(alice);
+        IERC20(USDC).approve(address(alice_aave_vault), type(uint).max);
+        alice_aave_vault.repay(BORROW_USD_AMOUNT / 10);
+        vm.stopPrank();
+    }
+
+    // Freeze allows withdraw() so depositors can exit existing positions during wind-down.
+    function test_aave_freeze_allowsWithdraw() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        vm.prank(alice);
+        alice_aave_vault.withdraw(1, alice);
+    }
+
+    // Freeze allows redeemUnderlying() so borrowers can exit to underlying collateral during wind-down.
+    function test_aave_freeze_allowsRedeemUnderlying() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        vm.prank(alice);
+        alice_aave_vault.redeemUnderlying(1, alice);
+    }
+
+    // Freeze allows liquidate() so unhealthy positions can be resolved during wind-down.
+    function test_aave_freeze_allowsLiquidate() public noGasMetering {
+        aave_setupCompleteExternalLiquidation();
+        assertTrue(alice_aave_vault.canLiquidate(), "Vault should be liquidatable");
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        liquidateAndRepayAsLiquidator();
+    }
+
+    // Freeze allows rebalance() so excess reserved credit can be released during wind-down.
+    function test_aave_freeze_allowsRebalance() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+        vm.warp(block.timestamp + 1000);
+        assertGt(alice_aave_vault.canRebalance(), 0);
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        vm.prank(eve);
+        alice_aave_vault.rebalance();
+    }
+
+    // Freeze allows handleExternalLiquidation() so externally liquidated positions can be settled.
+    function test_aave_freeze_allowsHandleExternalLiquidation() public noGasMetering {
+        aave_setupCompleteExternalLiquidation();
+        aave_externalLiquidateAliceVault();
+        drainAaveEthVaultToFullUtilization();
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        (address newLiquidator, uint liquidatorReward) = handleExternalLiquidationFromNewLiquidator();
+
+        assertEq(aWETHWrapper.convertToAssets(liquidatorReward), IERC20(aWETHWrapper.aToken()).balanceOf(newLiquidator), "Invalid liquidator reward");
+    }
+
+    // Freeze blocks borrow() to prevent new exposure on an existing collateral position.
+    function test_aave_freeze_blocksBorrow() public noGasMetering {
+        aave_firstBorrowViaCollateral(address(aWETHWrapper));
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        vm.prank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.borrow(1, alice);
+    }
+
+    // Freeze blocks setTwyneLiqLTV() so risk config cannot change during wind-down.
+    function test_aave_freeze_blocksSetTwyneLiqLTV() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 9100);
+
+        vm.prank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+
+        vm.prank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        alice_aave_vault.setTwyneLiqLTV(9050);
+    }
+
+    // Guardian's only lever is pause(); setPauseState is admin-only.
+    function test_aave_guardian_cannot_setPauseState() public noGasMetering {
+        address guardian = makeAddr("guardian");
+        vm.prank(admin);
+        collateralVaultFactory.setPauseGuardian(guardian);
+
+        vm.prank(guardian);
+        collateralVaultFactory.pause();
+        assertTrue(collateralVaultFactory.pauseState() == PauseState.Paused);
+
+        vm.prank(guardian);
+        vm.expectRevert();
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+    }
+
+    // Admin can cycle through every pause level via setPauseState.
+    function test_aave_admin_can_cycle_pause_states() public noGasMetering {
+        vm.startPrank(admin);
+        collateralVaultFactory.setPauseState(PauseState.Frozen);
+        assertTrue(collateralVaultFactory.pauseState() == PauseState.Frozen);
+
+        collateralVaultFactory.setPauseState(PauseState.Paused);
+        assertTrue(collateralVaultFactory.pauseState() == PauseState.Paused);
+
+        collateralVaultFactory.setPauseState(PauseState.Active);
+        assertTrue(collateralVaultFactory.pauseState() == PauseState.Active);
+
+        vm.expectRevert(TwyneErrors.ZeroAddress.selector);
+        twyneVaultManager.setAdmin(address(0));
+        vm.expectRevert(TwyneErrors.ZeroAddress.selector);
+        collateralVaultFactory.setAdmin(address(0));
+        vm.expectRevert();
+        twyneVaultManager.doCall(address(collateralVaultFactory), 0, hex"deadbeef");
+
+        twyneVaultManager.setAdmin(makeAddr("vmAdmin2"));
+        collateralVaultFactory.setAdmin(makeAddr("facAdmin2"));
         vm.stopPrank();
     }
 
@@ -622,8 +939,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         vm.expectRevert(TwyneErrors.ValueOutOfRange.selector);
         AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: 0.94e4,
@@ -632,8 +948,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         );
 
         AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: 0.95e4,
@@ -734,8 +1049,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         aaveEthVault.borrow(1e18, alice);
 
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -831,8 +1145,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // This means intermediate vault has 0 liquidity
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -892,8 +1205,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: initialUserLTV,
@@ -910,12 +1222,12 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Now admin reduces the maxTwyneLTV on vault manager to be lower than user's LTV
         uint16 newMaxLTV = initialUserLTV - 500; // Reduce by 5% (500 basis points)
         vm.startPrank(admin);
-        twyneVaultManager.setMaxLiquidationLTV(address(intermediateVault), newMaxLTV, 0);
+        twyneVaultManager.setMaxLiquidationLTV(address(intermediateVault), USDC, newMaxLTV, 0);
         vm.stopPrank();
 
         // Verify the max LTV was reduced
         assertEq(
-            twyneVaultManager.maxTwyneLTVs(address(intermediateVault)),
+            twyneVaultManager.maxTwyneLTVs(address(intermediateVault), USDC),
             newMaxLTV,
             "Max LTV should be reduced"
         );
@@ -924,7 +1236,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         assertGt(alice_aave_vault.twyneLiqLTV(), newMaxLTV, "User LTV should be higher than new max LTV");
 
         // Calculate expected reserved amount based on NEW max LTV (not user's LTV)
-        uint externalLiqBuffer = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault)));
+        uint externalLiqBuffer = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault), USDC));
         uint externalLiqLTV = getLiqLTV(collateralAsset);
         uint liqLTV_external = externalLiqLTV * externalLiqBuffer; // 1e8 precision
 
@@ -973,9 +1285,13 @@ contract AaveTestEdgeCases is AaveTestBase {
         );
     }
 
-    function splitCollateralAfterExtLiq(uint _collateralBalance, uint _maxRepay, uint _maxRelease) internal view returns (uint, uint, uint) {
+    function splitCollateralAfterExtLiq(uint _collateralBalance, uint _maxRepay, uint _maxRelease) internal returns (uint, uint, uint) {
 
         IAaveV3ATokenWrapper __asset = aWETHWrapper;
+
+        AaveLiqCollateralVault helper = new AaveLiqCollateralVault(address(evc), aavePool, address(0));
+        vm.etch(address(alice_aave_vault), address(helper).code);
+        AaveLiqCollateralVault aliceAaveVault = AaveLiqCollateralVault(address(alice_aave_vault));
 
         if (_maxRepay == 0) {
             uint _releaseAmount = Math.min(_collateralBalance, _maxRelease);
@@ -991,12 +1307,12 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Convert _maxRepay / maxTwyneLTV to USD
         // Result is in USD with Chainlink decimals for target asset
-        uint userCollateral = targetAssetPrice * (_maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault())))
-            / alice_aave_vault.tenPowVAssetDecimals();
+        uint userCollateral = targetAssetPrice * (_maxRepay * MAXFACTOR / twyneVaultManager.maxTwyneLTVs(address(alice_aave_vault.intermediateVault()), alice_aave_vault.targetAsset()))
+            / aliceAaveVault.getTenPowVAssetDecimals();
 
         // Convert from USD to collateral asset units
         // Divides by collateral asset's Chainlink price
-        userCollateral = userCollateral * alice_aave_vault.tenPowAssetDecimals() / uint(__asset.latestAnswer());
+        userCollateral = userCollateral * aliceAaveVault.getTenPowAssetDecimals() / uint(__asset.latestAnswer());
 
 
         // Cap by available collateral balance
@@ -1016,7 +1332,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Step 3: Split userCollateral between borrower and liquidator using dynamic incentive
         // Convert userCollateral to USD for collateralForBorrower calculation
         uint C_new =
-            userCollateral * uint(__asset.latestAnswer()) / alice_aave_vault.tenPowAssetDecimals();
+            userCollateral * uint(__asset.latestAnswer()) / aliceAaveVault.getTenPowAssetDecimals();
 
 
         (, uint B,,,,) = IAaveV3Pool(aavePool).getUserAccountData(address(alice_aave_vault));
@@ -1042,8 +1358,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1064,10 +1379,10 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Calculate expected reservation using the chosen leg formula
         // When chosen leg dominates: invariantAmount = ceilDiv(C * MAXFACTOR * minLTV, adjExtLiqLTV)
-        uint externalLiqBuffer = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault)));
+        uint externalLiqBuffer = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault), USDC));
         uint externalLiqLTV = getLiqLTV(collateralAsset);
         uint adjExtLiqLTV = externalLiqBuffer * externalLiqLTV;
-        uint minLTV = Math.min(twyneLiqLTV, twyneVaultManager.maxTwyneLTVs(address(intermediateVault)));
+        uint minLTV = Math.min(twyneLiqLTV, twyneVaultManager.maxTwyneLTVs(address(intermediateVault), USDC));
 
         // Expected: ceilDiv(C * MAXFACTOR * minLTV, adjExtLiqLTV)
         uint expectedInvariant = Math.ceilDiv(COLLATERAL_AMOUNT * MAXFACTOR * minLTV, adjExtLiqLTV);
@@ -1093,8 +1408,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault WITHOUT credit deposit (0 liquidity)
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1139,8 +1453,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1178,8 +1491,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault and deposit
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1227,8 +1539,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault and deposit
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1270,13 +1581,12 @@ contract AaveTestEdgeCases is AaveTestBase {
         aave_creditDeposit(collateralAsset);
 
         IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
-        uint16 initialMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(intermediateVault));
+        uint16 initialMaxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(intermediateVault), USDC);
 
         // Create collateral vault with high twyneLiqLTV (capped by maxTwyneLTV)
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: initialMaxTwyneLTV,
@@ -1292,7 +1602,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Lower maxTwyneLTV
         uint16 newMaxTwyneLTV = initialMaxTwyneLTV - 500; // Reduce by 5%
         vm.prank(twyneVaultManager.admin());
-        twyneVaultManager.setMaxLiquidationLTV(address(intermediateVault), newMaxTwyneLTV, 0);
+        twyneVaultManager.setMaxLiquidationLTV(address(intermediateVault), USDC, newMaxTwyneLTV, 0);
 
         // Check if we can rebalance (have excess credit since invariant decreased)
         try alice_aave_vault.canRebalance() returns (uint excessCredit) {
@@ -1318,8 +1628,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1333,12 +1642,12 @@ contract AaveTestEdgeCases is AaveTestBase {
         uint initialMaxRelease = alice_aave_vault.maxRelease();
 
         // Get initial buffer and decrease it
-        uint16 initialBuffer = twyneVaultManager.externalLiqBuffers(address(intermediateVault));
+        uint16 initialBuffer = twyneVaultManager.externalLiqBuffers(address(intermediateVault), USDC);
         uint16 newBuffer = initialBuffer - 200; // Decrease by 2%
         if (newBuffer == 0) newBuffer = 1;
 
         vm.prank(twyneVaultManager.admin());
-        twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), newBuffer, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), USDC, newBuffer, 0);
 
         // canRebalance should fail (no excess credit)
         vm.expectRevert(TwyneErrors.CannotRebalance.selector);
@@ -1366,8 +1675,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1381,12 +1689,12 @@ contract AaveTestEdgeCases is AaveTestBase {
         uint initialMaxRelease = alice_aave_vault.maxRelease();
 
         // Get initial buffer and increase it
-        uint16 initialBuffer = twyneVaultManager.externalLiqBuffers(address(intermediateVault));
+        uint16 initialBuffer = twyneVaultManager.externalLiqBuffers(address(intermediateVault), USDC);
         uint16 newBuffer = initialBuffer + 200; // Increase by 2%
         if (newBuffer > MAXFACTOR) newBuffer = uint16(MAXFACTOR);
 
         vm.prank(twyneVaultManager.admin());
-        twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), newBuffer, 0);
+        twyneVaultManager.setExternalLiqBuffer(address(intermediateVault), USDC, newBuffer, 0);
 
         // Check if we can rebalance
         try alice_aave_vault.canRebalance() returns (uint excessCredit) {
@@ -1410,8 +1718,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1472,8 +1779,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         // Create collateral vault with moderate deposit
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[collateralAsset],
                 _targetVault: aavePool,
                 _liqLTV: twyneLiqLTV,
@@ -1487,7 +1793,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Record low liquidity state
         uint lowLiqTotalAssets = alice_aave_vault.totalAssetsDepositedOrReserved();
-        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault))) * getLiqLTV(collateralAsset);
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(address(intermediateVault), USDC)) * getLiqLTV(collateralAsset);
         uint dynamicLegLow = adjExtLiqLTV * (intermediateVault.cash() + lowLiqTotalAssets);
 
         // Now add lots of liquidity
@@ -1508,7 +1814,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Key invariant: vault maintains proper credit reservation
         uint userCollateral = highLiqTotalAssets - alice_aave_vault.maxRelease();
-        uint maxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(intermediateVault));
+        uint maxTwyneLTV = twyneVaultManager.maxTwyneLTVs(address(intermediateVault), USDC);
         uint chosenLeg = userCollateral * MAXFACTOR * Math.min(twyneLiqLTV, maxTwyneLTV);
         uint expectedInvariant = Math.ceilDiv(Math.min(dynamicLegHigh, chosenLeg), adjExtLiqLTV);
         assertApproxEqAbs(highLiqTotalAssets, expectedInvariant, 2, "Invariant calculation should hold");
@@ -1533,7 +1839,7 @@ contract AaveTestEdgeCases is AaveTestBase {
         setAaveLTV(address(aWETHWrapper), newAaveLT);
 
         // Verify the dangerous condition: adjExtLiqLTV > MAXFACTOR * twyneLiqLTV
-        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault))
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault, USDC))
             * getLiqLTV(address(aWETHWrapper));
         assertGt(adjExtLiqLTV, MAXFACTOR * uint(liqLTV), "adjExtLiqLTV should exceed MAXFACTOR * twyneLiqLTV");
 
@@ -1606,11 +1912,11 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Ramp maxTwyneLTV down to 1
         vm.prank(admin);
-        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, 1, 1 days);
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, USDC, 1, 1 days);
         vm.warp(block.timestamp + 1 days + 1);
-        assertEq(twyneVaultManager.maxTwyneLTVs(intermediateVault), 1);
+        assertEq(twyneVaultManager.maxTwyneLTVs(intermediateVault, USDC), 1);
 
-        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault))
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault, USDC))
             * getLiqLTV(address(aWETHWrapper));
         assertGt(adjExtLiqLTV, MAXFACTOR, "Floor should be active");
 
@@ -1640,7 +1946,7 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Start with a low buffer, create vault, then restore to 1e4
         vm.prank(admin);
-        twyneVaultManager.setExternalLiqBuffer(intermediateVault, 0.5e4, 0);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, USDC, 0.5e4, 0);
 
         uint aaveLiqLTV = getLiqLTV(address(aWETHWrapper));
         // liqLTV = aaveLiqLTV * 3/4: above _checkLiqLTV minimum at buffer 0.5e4,
@@ -1653,9 +1959,9 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         // Restore buffer to 1e4 so adjExtLiqLTV > MAXFACTOR * lowLiqLTV
         vm.prank(admin);
-        twyneVaultManager.setExternalLiqBuffer(intermediateVault, 1e4, 0);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, USDC, 1e4, 0);
 
-        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault)) * aaveLiqLTV;
+        uint adjExtLiqLTV = uint(twyneVaultManager.externalLiqBuffers(intermediateVault, USDC)) * aaveLiqLTV;
         assertGt(adjExtLiqLTV, MAXFACTOR * uint(lowLiqLTV), "Floor should be active");
 
         // Floor: collateralScaledByLiqLTV1e8 == adjExtLiqLTV * userCollateral
@@ -1836,5 +2142,65 @@ contract AaveTestEdgeCases is AaveTestBase {
 
         assertGt(alice_aave_vault.totalAssetsDepositedOrReserved(), 0, "Vault should have assets after re-deposit");
         assertGt(alice_aave_vault.maxRelease(), 0, "Vault should have reserved credit after re-deposit");
+    }
+
+    /// @notice Pins the fail-closed behavior of an unconfigured (intermediateVault, targetAsset)
+    ///         liq-params entry (maxTwyneLTV = externalLiqBuffer = 0), the state a live pair is
+    ///         left in when the post-upgrade per-asset config migration is missed or mis-keyed.
+    /// @dev Debt-free nuance: Aave reports hf = uint256.max for a collateral-only position, the
+    ///      overflow guard in _canLiquidate skips scenario 1, and the vault is not flagged
+    ///      liquidatable — the exit path stays open. Debt-carrying vaults are bricked: maxBorrow()
+    ///      is 0, user operations revert with a division-by-zero panic (adjExtLiqLTV = 0), and
+    ///      internal liquidation reverts VaultStatusLiquidatable with no way to restore health.
+    function test_aave_unconfiguredLiqParamsFailClosed() public noGasMetering {
+        aave_collateralDepositWithoutBorrow(address(aWETHWrapper), 0.9e4);
+        address intermediateVault = intermediateVaultFor[address(aWETHWrapper)];
+
+        // Debt-free vault: orphaned config must not flag it liquidatable.
+        vm.startPrank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, USDC, 0, 0);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, USDC, 0, 0);
+        vm.stopPrank();
+        assertFalse(alice_aave_vault.canLiquidate(), "debt-free vault flagged liquidatable");
+
+        // Restore config to take on external debt, then re-orphan the entry.
+        vm.startPrank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, USDC, maxLTVInitial, 0);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, USDC, externalLiqBufferInitial, 0);
+        vm.stopPrank();
+
+        uint256 borrowAmount = alice_aave_vault.maxBorrow() / 2;
+        vm.startPrank(alice);
+        alice_aave_vault.borrow(borrowAmount, alice);
+        vm.stopPrank();
+
+        vm.startPrank(admin);
+        twyneVaultManager.setMaxLiquidationLTV(intermediateVault, USDC, 0, 0);
+        twyneVaultManager.setExternalLiqBuffer(intermediateVault, USDC, 0, 0);
+        vm.stopPrank();
+
+        // 1. No new debt can be opened: maxBorrow() is 0 rather than reverting.
+        assertEq(alice_aave_vault.maxBorrow(), 0, "maxBorrow not zero");
+
+        // 2. The debt-carrying vault is flagged liquidatable (buffer = 0 strips the
+        //    external-liquidation margin), and user operations revert fail-closed: with
+        //    adjExtLiqLTV = 0 the excess-credit invariant math divides by zero before the
+        //    deferred checkVaultStatus would reject the batch with VaultStatusLiquidatable.
+        assertTrue(alice_aave_vault.canLiquidate(), "vault not liquidatable");
+
+        vm.startPrank(alice);
+        vm.expectRevert(abi.encodePacked(bytes4(0x4e487b71), uint256(0x12))); // Panic: division by zero
+        alice_aave_vault.deposit(0.01e18);
+        vm.stopPrank();
+
+        // 3. Internal liquidation cannot unwind the position: liquidate() books the takeover
+        //    but the vault status check it requires can never pass while the entry reads (0, 0).
+        deal(USDC, liquidator, borrowAmount + 1_000_000e6);
+        vm.startPrank(liquidator);
+        IERC20(address(aWETHWrapper)).approve(address(alice_aave_vault), type(uint256).max);
+        IERC20(USDC).approve(address(alice_aave_vault), type(uint256).max);
+        vm.expectRevert(TwyneErrors.VaultStatusLiquidatable.selector);
+        alice_aave_vault.liquidate();
+        vm.stopPrank();
     }
 }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {EulerCollateralVault, IEVault} from "src/twyne/EulerCollateralVault.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
@@ -60,7 +61,7 @@ contract LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEvents
     ///    EulerVault.skim deposits underlying collateral and transfers Euler vault tokens (collateral) to collateral vault
     /// 6. EVC batch calls
     ///    a. skim on collateral vault to deposit all the airdropped collateral
-    ///    b. borrow on collateral vault to borrow target asset, this contract receives the borrowed amount
+    ///    b. borrow on collateral vault to borrow target asset, net of any target asset returned by the swap route
     /// 7. Approves Morpho to transfer target asset from this contract
     /// 8. Morpho transferFroms the flashloaned target asset from this contract
     /// @param collateralVault Address of the user's collateral vault
@@ -139,6 +140,11 @@ contract LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEvents
         // Euler vault receives the underlying collateral.
         ISwapper(SWAPPER).multicall(swapData);
 
+        // Target asset the route returned to this contract (e.g. an exact-output
+        // route sweeping its unconsumed input back). Only the consumed part needs to be
+        // borrowed; the returned part settles the flashloan repayment directly.
+        uint borrowAmount = amount - Math.min(amount, IERC20(targetAsset).balanceOf(address(this)));
+
         // Step 3: Verify swap output and skim collateral to collateral vault
         // The swap sends underlying collateral to Euler vault, which then needs to be skimmed.
         // Collateral vault receives the collateral.
@@ -149,7 +155,7 @@ contract LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEvents
             deadline
         );
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](Math.ternary(borrowAmount > 0, 2, 1));
 
         // Deposit all airdropped collateral to collateral vault
         items[0] = IEVC.BatchItem({
@@ -159,13 +165,15 @@ contract LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, IEvents
             data: abi.encodeCall(CollateralVaultBase.skim, ())
         });
 
-        // Borrow target asset from collateral vault (amount needed to repay flashloan)
-        items[1] = IEVC.BatchItem({
-            targetContract: collateralVault,
-            onBehalfOfAccount: user,
-            value: 0,
-            data: abi.encodeCall(CollateralVaultBase.borrow, (amount, address(this)))
-        });
+        // Borrow target asset from collateral vault, net of any target asset returned by the swap route
+        if (borrowAmount > 0) {
+            items[1] = IEVC.BatchItem({
+                targetContract: collateralVault,
+                onBehalfOfAccount: user,
+                value: 0,
+                data: abi.encodeCall(CollateralVaultBase.borrow, (borrowAmount, address(this)))
+            });
+        }
 
         IEVC(evc).batch(items);
 

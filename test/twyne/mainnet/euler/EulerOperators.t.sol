@@ -7,11 +7,10 @@ import "euler-vault-kit/EVault/shared/types/Types.sol";
 import {EVCUtil} from "ethereum-vault-connector/utils/EVCUtil.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {EulerCollateralVault, IERC20 as IER20_OZ} from "src/twyne/EulerCollateralVault.sol";
-import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {Errors} from "euler-vault-kit/EVault/shared/Errors.sol";
 import {Errors as EVCErrors} from "ethereum-vault-connector/Errors.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
-import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {MockSwapper} from "test/mocks/MockSwapper.sol";
 import {MockChainlinkOracle} from "test/mocks/MockChainlinkOracle.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -25,12 +24,10 @@ contract EulerOperators is EulerTestBase {
 
         vm.startPrank(bob);
         EulerCollateralVault bob_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV,
-                _targetAsset: address(0)
+                _liqLTV: twyneLiqLTV
             })
         );
 
@@ -43,12 +40,10 @@ contract EulerOperators is EulerTestBase {
         // Create collateral vault for user
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV,
-                _targetAsset: address(0)
+                _liqLTV: twyneLiqLTV
             })
         );
 
@@ -66,8 +61,14 @@ contract EulerOperators is EulerTestBase {
             // Prepare swap data for the swapper
             deal(WETH, eulerSwapper, minAmountOutWETH + 10);
             bytes memory swapData = abi.encodeCall(MockSwapper.swap, (USDC, WETH, flashloanAmount, minAmountOutWETH, eulerWETH));
-            bytes[] memory multicallData = new bytes[](1);
+            bytes[] memory multicallData = new bytes[](3);
             multicallData[0] = swapData;
+            // Route returning 5000 USDC of the 20000 USDC flashloan: the drain step (a
+            // plain swap payout) leaves the change-back in the swapper, sweep delivers it.
+            address leftoverSink = makeAddr("leftoverSink");
+            multicallData[1] =
+                abi.encodeCall(MockSwapper.swap, (WETH, USDC, 1 ether, flashloanAmount - 5000e6 - 10, leftoverSink));
+            multicallData[2] = abi.encodeCall(MockSwapper.sweep, (USDC, 5000e6, address(leverageOperator)));
 
             vm.expectRevert(TwyneErrors.T_CallerNotBorrower.selector);
             leverageOperator.executeLeverage(
@@ -131,7 +132,7 @@ contract EulerOperators is EulerTestBase {
             evc.batch(items);
 
             assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), userCollateralAmount + userUnderlyingCollateralAmount);
-            assertEq(alice_collateral_vault.maxRepay(), flashloanAmount);
+            assertEq(alice_collateral_vault.maxRepay(), flashloanAmount - 5000e6);
 
             // Verify that LeverageOperator has no remaining token balances
             assertEq(IERC20(eulerWETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerWETH");
@@ -155,7 +156,7 @@ contract EulerOperators is EulerTestBase {
             );
 
             assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease(), userCollateralAmount + userUnderlyingCollateralAmount);
-            assertEq(alice_collateral_vault.maxRepay(), flashloanAmount);
+            assertEq(alice_collateral_vault.maxRepay(), flashloanAmount - 5000e6);
 
             // Verify that LeverageOperator has no remaining token balances
             assertEq(IERC20(eulerWETH).balanceOf(address(leverageOperator)), 0, "LeverageOperator should have 0 eulerWETH");

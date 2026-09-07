@@ -9,6 +9,7 @@ import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
 import {IEvents} from "src/interfaces/IEvents.sol";
 import {RevertBytes} from "euler-vault-kit/EVault/shared/lib/RevertBytes.sol";
+import {Id} from "morpho/interfaces/IMorpho.sol";
 
 interface ICollateralVaultBase {
     function asset() external view returns (address);
@@ -31,32 +32,34 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     address public collateralVaultFactory;
 
-    mapping(address intermediateVault => uint16 maxTwyneLiqLTV) internal _maxTwyneLTVs;
-    mapping(address intermediateVault => uint16 externalLiqBuffer) internal _externalLiqBuffers;
+    mapping(address intermediateVault => mapping(address targetAsset => uint16 maxTwyneLiqLTV)) internal _maxTwyneLTVs;
+    mapping(address intermediateVault => mapping(address targetAsset => uint16 externalLiqBuffer)) internal _externalLiqBuffers;
 
-    EulerRouter public oracleRouter;
-
-    /// @dev Deprecated. Kept for storage layout compatibility. Use isIntermediateVault instead.
-    /// @dev MIGRATION: When upgrading from v2, existing intermediate vaults registered in this mapping
-    /// must be re-registered via setIntermediateVault() so they appear in isIntermediateVault.
+    EulerRouter internal __deprecated_oracleRouter;
     mapping(address collateralAddress => address intermediateVault) internal __deprecated_intermediateVaults;
+
     mapping(address intermediateVault => mapping(address targetVault => bool allowed)) public isAllowedTargetVault;
 
-    mapping(address intermediateVault => address[] targetVaults) public allowedTargetVaultList;
+    mapping(address intermediateVault => address[] targetVaults) internal __deprecated_allowedTargetVaultList;
 
     mapping(address intermediateVault => mapping(address targetVault => mapping(address targetAsset => bool))) public isAllowedTargetAssets;
 
-    mapping(address intermediateVault => RampConfig maxTwyneLTVRamp) internal maxTwyneLTVConfigs;
-    mapping(address intermediateVault => RampConfig externalLiqBufferRamp) internal externalLiqBufferConfigs;
+    mapping(address intermediateVault => mapping(address targetAsset => RampConfig maxTwyneLTVRamp)) internal maxTwyneLTVConfigs;
+    mapping(address intermediateVault => mapping(address targetAsset => RampConfig externalLiqBufferRamp)) internal externalLiqBufferConfigs;
 
     mapping(address intermediateVault => bool) public isIntermediateVault;
 
     address public admin;
 
-    uint[45] private __gap;
+    mapping(address targetVault => mapping(address intermediateVault => mapping(Id marketId => bool isSupported))) public isAllowedMorphoMarket;
+
+    mapping(address intermediateVault => mapping(address targetAsset => uint16 maxBorrowBuffer)) public borrowBuffer;
+
+    uint[43] private __gap;
 
     modifier onlyAdmin() {
-        require(_msgSender() == admin, CallerNotAdmin());
+        address sender = _msgSender();
+        require(sender == admin || sender == owner(), CallerNotAdmin());
         _;
     }
 
@@ -83,13 +86,7 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
 
     /// @dev increment the version for proxy upgrades
     function version() external pure returns (uint) {
-        return 4;
-    }
-
-    /// @notice Set oracleRouter address. Governance-only.
-    function setOracleRouter(address _oracle) external onlyAdmin {
-        oracleRouter = EulerRouter(_oracle);
-        emit T_SetOracleRouter(_oracle);
+        return 5;
     }
 
     /// @notice Register or unregister an intermediate vault. Governance-only.
@@ -105,7 +102,6 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
     /// @param _targetVault The target vault that should be allowed for the intermediate vault.
     function setAllowedTargetVault(address _intermediateVault, address _targetVault) external onlyAdmin {
         isAllowedTargetVault[_intermediateVault][_targetVault] = true;
-        allowedTargetVaultList[_intermediateVault].push(_targetVault);
         emit T_AddAllowedTargetVault(_intermediateVault, _targetVault);
     }
 
@@ -119,109 +115,132 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
         emit  T_AddAllowedTargetVaultAsset(_intermediateVault, _targetVault, _targetAsset);
     }
 
-    /// @notice Remove an allowed target vault for a specific intermediate vault. Governance-only.
+    /// @notice Set or unset an allowed Morpho market for a specific target vault and intermediate vault pair.
+    /// @param _targetVault address of the target vault (Morpho protocol address).
     /// @param _intermediateVault address of the intermediate vault.
-    /// @param _targetVault The target vault that should be allowed for the intermediate vault.
-    /// @param _index The index at which this _targetVault is stored in `allowedTargetVaultList`.
-    function removeAllowedTargetVault(address _intermediateVault, address _targetVault, uint _index) external onlyAdmin {
-        isAllowedTargetVault[_intermediateVault][_targetVault] = false;
-
-        require(allowedTargetVaultList[_intermediateVault][_index] == _targetVault, IncorrectIndex());
-
-        uint lastIndex = allowedTargetVaultList[_intermediateVault].length - 1;
-        if (_index != lastIndex) allowedTargetVaultList[_intermediateVault][_index] = allowedTargetVaultList[_intermediateVault][lastIndex];
-        allowedTargetVaultList[_intermediateVault].pop();
-        emit T_RemoveAllowedTargetVault(_intermediateVault, _targetVault, _index);
+    /// @param _marketId Morpho market id derived from market params.
+    /// @param _value true to whitelist the market, false to remove it.
+    function setAllowedMorphoMarket(address _targetVault, address _intermediateVault, Id _marketId, bool _value) external onlyAdmin {
+        isAllowedMorphoMarket[_targetVault][_intermediateVault][_marketId] = _value;
+        emit T_SetAllowedMorphoMarket(_targetVault, _intermediateVault, Id.unwrap(_marketId), _value);
     }
 
-    /// @notice Return the length of allowedTargetVaultList. Useful for frontend.
-    function targetVaultLength(address _intermediateVault) external view returns (uint) {
-        return allowedTargetVaultList[_intermediateVault].length;
+    /// @notice Set the max-borrow buffer for an (intermediate vault, target asset) pair. Governance-only. 1e4 precision (e.g. 300 = 3%).
+    /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
+    /// @param _borrowBuffer max-borrow buffer
+    /// @dev `_borrowBuffer` must be strictly less than `maxTwyneLiqLTV - liqLTV_e` for the pair,
+    /// otherwise `maxBorrow()` reverts with arithmetic underflow.
+    function setBorrowBuffer(address _intermediateVault, address _targetAsset, uint16 _borrowBuffer) external onlyAdmin {
+        require(_borrowBuffer <= MAXFACTOR, ValueOutOfRange());
+        borrowBuffer[_intermediateVault][_targetAsset] = _borrowBuffer;
+        emit T_SetBorrowBuffer(_intermediateVault, _targetAsset, _borrowBuffer);
     }
 
-    /// @notice Set maxTwyneLiqLTV for an intermediate vault with optional linear ramp-down. Governance-only.
+    /// @notice Set maxTwyneLiqLTV for an (intermediate vault, target asset) pair with optional linear ramp-down. Governance-only.
     /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
     /// @param _ltv new target maxTwyneLiqLTV value (1e4 precision).
     /// @param _rampDuration ramp duration in seconds. Set to 0 for immediate update.
     /// @dev If `_rampDuration > 0`, `_ltv` must be strictly lower than the current effective maxTwyneLTV.
     /// The current effective value is snapshotted as the ramp starting point.
-    function setMaxLiquidationLTV(address _intermediateVault, uint16 _ltv, uint32 _rampDuration) external onlyAdmin {
+    function setMaxLiquidationLTV(address _intermediateVault, address _targetAsset, uint16 _ltv, uint32 _rampDuration) external onlyAdmin {
         require(_ltv <= MAXFACTOR, ValueOutOfRange());
-        uint16 currentLTV = maxTwyneLTVs(_intermediateVault);
+        uint16 currentLTV = maxTwyneLTVs(_intermediateVault, _targetAsset);
         if (_rampDuration > 0) {
             require(_ltv < currentLTV, ValueOutOfRange());
         }
 
-        _maxTwyneLTVs[_intermediateVault] = _ltv;
-        maxTwyneLTVConfigs[_intermediateVault] = RampConfig({
+        _maxTwyneLTVs[_intermediateVault][_targetAsset] = _ltv;
+        maxTwyneLTVConfigs[_intermediateVault][_targetAsset] = RampConfig({
             initialValue: currentLTV,
             targetTimestamp: uint48(block.timestamp + _rampDuration),
             rampDuration: _rampDuration
         });
-        emit T_SetMaxLiqLTV(_intermediateVault, _ltv, _rampDuration);
+        emit T_SetMaxLiqLTV(_intermediateVault, _targetAsset, _ltv, _rampDuration);
     }
 
-    /// @notice Set externalLiqBuffer for an intermediate vault with optional linear ramp-down. Governance-only.
+    /// @notice Set externalLiqBuffer for an (intermediate vault, target asset) pair with optional linear ramp-down. Governance-only.
     /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
     /// @param _liqBuffer new target externalLiqBuffer value (1e4 precision).
     /// @param _rampDuration ramp duration in seconds. Set to 0 for immediate update.
     /// @dev If `_rampDuration > 0`, `_liqBuffer` must be strictly lower than the current effective externalLiqBuffer.
     /// The current effective value is snapshotted as the ramp starting point.
-    function setExternalLiqBuffer(address _intermediateVault, uint16 _liqBuffer, uint32 _rampDuration) external onlyAdmin {
+    function setExternalLiqBuffer(address _intermediateVault, address _targetAsset, uint16 _liqBuffer, uint32 _rampDuration) external onlyAdmin {
         require(_liqBuffer <= MAXFACTOR, ValueOutOfRange());
-        uint16 currentBuffer = externalLiqBuffers(_intermediateVault);
+        uint16 currentBuffer = externalLiqBuffers(_intermediateVault, _targetAsset);
         if (_rampDuration > 0) {
             require(_liqBuffer < currentBuffer, ValueOutOfRange());
         }
 
-        _externalLiqBuffers[_intermediateVault] = _liqBuffer;
-        externalLiqBufferConfigs[_intermediateVault] = RampConfig({
+        _externalLiqBuffers[_intermediateVault][_targetAsset] = _liqBuffer;
+        externalLiqBufferConfigs[_intermediateVault][_targetAsset] = RampConfig({
             initialValue: currentBuffer,
             targetTimestamp: uint48(block.timestamp + _rampDuration),
             rampDuration: _rampDuration
         });
-        emit T_SetExternalLiqBuffer(_intermediateVault, _liqBuffer, _rampDuration);
+        emit T_SetExternalLiqBuffer(_intermediateVault, _targetAsset, _liqBuffer, _rampDuration);
     }
 
-    /// @notice Return current effective maxTwyneLTV for an intermediate vault.
+    /// @notice Return current effective maxTwyneLTV for an (intermediate vault, target asset) pair.
     /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
     /// @return maxTwyneLiqLTV effective maxTwyneLTV after applying ramp interpolation.
-    function maxTwyneLTVs(address _intermediateVault) public view returns (uint16 maxTwyneLiqLTV) {
-        return _getRampedValue(_maxTwyneLTVs[_intermediateVault], maxTwyneLTVConfigs[_intermediateVault]);
+    function maxTwyneLTVs(address _intermediateVault, address _targetAsset) public view returns (uint16) {
+        return _getRampedValue(_maxTwyneLTVs[_intermediateVault][_targetAsset], maxTwyneLTVConfigs[_intermediateVault][_targetAsset]);
     }
 
-    /// @notice Return current effective externalLiqBuffer for an intermediate vault.
+    /// @notice Return current effective externalLiqBuffer for an (intermediate vault, target asset) pair.
     /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
     /// @return externalLiqBuffer effective externalLiqBuffer after applying ramp interpolation.
-    function externalLiqBuffers(address _intermediateVault) public view returns (uint16 externalLiqBuffer) {
-        return _getRampedValue(_externalLiqBuffers[_intermediateVault], externalLiqBufferConfigs[_intermediateVault]);
+    function externalLiqBuffers(address _intermediateVault, address _targetAsset) public view returns (uint16) {
+        return _getRampedValue(_externalLiqBuffers[_intermediateVault][_targetAsset], externalLiqBufferConfigs[_intermediateVault][_targetAsset]);
     }
 
-    /// @notice Return full maxTwyneLTV ramp metadata for an intermediate vault.
+    /// @notice Return current effective externalLiqBuffer, maxTwyneLTV, and borrowBuffer for an
+    ///   (intermediate vault, target asset) pair in one call.
     /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
+    /// @return externalLiqBuffer effective externalLiqBuffer after applying ramp interpolation.
+    /// @return maxTwyneLiqLTV effective maxTwyneLTV after applying ramp interpolation.
+    /// @return borrowBuffer max-borrow buffer for the (intermediate vault, target asset) pair (1e4 precision).
+    function liqParams(address _intermediateVault, address _targetAsset) external view returns (uint16, uint16, uint16) {
+        return (
+            _getRampedValue(_externalLiqBuffers[_intermediateVault][_targetAsset], externalLiqBufferConfigs[_intermediateVault][_targetAsset]),
+            _getRampedValue(_maxTwyneLTVs[_intermediateVault][_targetAsset], maxTwyneLTVConfigs[_intermediateVault][_targetAsset]),
+            borrowBuffer[_intermediateVault][_targetAsset]
+        );
+    }
+
+    /// @notice Return full maxTwyneLTV ramp metadata for an (intermediate vault, target asset) pair.
+    /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
     /// @return maxTwyneLTV fully converged maxTwyneLTV target (stored target value).
     /// @return initialMaxTwyneLTV initial maxTwyneLTV value when ramp began.
     /// @return targetTimestamp timestamp when current value converges to target.
     /// @return rampDuration configured ramp duration in seconds.
-    function maxTwyneLTVFull(address _intermediateVault) external view returns (uint16, uint16, uint48, uint32) {
-        RampConfig storage cfg = maxTwyneLTVConfigs[_intermediateVault];
-        return (_maxTwyneLTVs[_intermediateVault], cfg.initialValue, cfg.targetTimestamp, cfg.rampDuration);
+    function maxTwyneLTVFull(address _intermediateVault, address _targetAsset) external view returns (uint16, uint16, uint48, uint32) {
+        RampConfig storage cfg = maxTwyneLTVConfigs[_intermediateVault][_targetAsset];
+        return (_maxTwyneLTVs[_intermediateVault][_targetAsset], cfg.initialValue, cfg.targetTimestamp, cfg.rampDuration);
     }
 
-    /// @notice Return full externalLiqBuffer ramp metadata for an intermediate vault.
+    /// @notice Return full externalLiqBuffer ramp metadata for an (intermediate vault, target asset) pair.
     /// @param _intermediateVault address of the intermediate vault.
+    /// @param _targetAsset address of the target asset.
     /// @return externalLiqBuffer fully converged externalLiqBuffer target (stored target value).
     /// @return initialExternalLiqBuffer initial externalLiqBuffer value when ramp began.
     /// @return targetTimestamp timestamp when current value converges to target.
     /// @return rampDuration configured ramp duration in seconds.
-    function externalLiqBufferFull(address _intermediateVault) external view returns (uint16, uint16, uint48, uint32) {
-        RampConfig storage cfg = externalLiqBufferConfigs[_intermediateVault];
-        return (_externalLiqBuffers[_intermediateVault], cfg.initialValue, cfg.targetTimestamp, cfg.rampDuration);
+    function externalLiqBufferFull(address _intermediateVault, address _targetAsset) external view returns (uint16, uint16, uint48, uint32) {
+        RampConfig storage cfg = externalLiqBufferConfigs[_intermediateVault][_targetAsset];
+        return (_externalLiqBuffers[_intermediateVault][_targetAsset], cfg.initialValue, cfg.targetTimestamp, cfg.rampDuration);
     }
 
     /// @notice Set new collateralVaultFactory address. Governance-only.
     /// @param _factory new collateralVaultFactory address.
-    function setCollateralVaultFactory(address _factory) external onlyAdmin {
+    function setCollateralVaultFactory(address _factory) external onlyOwner {
         collateralVaultFactory = _factory;
         emit T_SetCollateralVaultFactory(_factory);
     }
@@ -248,23 +267,13 @@ contract VaultManager is UUPSUpgradeable, OwnableUpgradeable, IErrors, IEvents {
         emit T_SetLTV(address(_intermediateVault), _collateralVault, _borrowLimit, _liquidationLimit, _rampDuration);
     }
 
-    /// @notice Set new oracleRouter resolved vault value. Callable by governance or collateral vault factory.
-    /// @param _vault EVK or collateral vault address. Must implement `convertToAssets()`.
-    /// @param _allow bool value to pass to govSetResolvedVault. True to configure the vault, false to clear the record.
-    /// @dev called by createCollateralVault() when a new collateral vault is created so collateral can be price properly.
-    /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.
-    function setOracleResolvedVault(address _vault, bool _allow) external onlyCollateralVaultFactoryOrAdmin {
-        oracleRouter.govSetResolvedVault(_vault, _allow);
-        emit T_SetOracleResolvedVault(_vault, _allow);
-    }
-
     /// @notice Set new oracleRouter resolved vault value for any oracle router. Callable by governance or collateral vault factory.
     /// @param _oracleRouter Oracle router which will be called by Vault Manager.
     /// @param _vault EVK or collateral vault address. Must implement `convertToAssets()`.
     /// @param _allow bool value to pass to govSetResolvedVault. True to configure the vault, false to clear the record.
     /// @dev called by createCollateralVault() when a new collateral vault is created so collateral can be price properly.
     /// @dev Configures the collateral vault to use internal pricing via `convertToAssets()`.
-    function setOracleResolvedVaultForOracleRouter(address _oracleRouter, address _vault, bool _allow) external onlyCollateralVaultFactoryOrAdmin {
+    function setOracleResolvedVault(address _oracleRouter, address _vault, bool _allow) external onlyCollateralVaultFactoryOrAdmin {
         EulerRouter(_oracleRouter).govSetResolvedVault(_vault, _allow);
         emit T_SetOracleResolvedVault(_oracleRouter, _vault, _allow);
     }

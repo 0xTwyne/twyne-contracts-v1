@@ -3,6 +3,12 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
+# forge 1.8.0 hoists euler-price-oracle's OZ 4.9.6 for `@openzeppelin/contracts/`
+# (remappings.txt cannot override nested-hoisted remaps; auto_detect_remappings=false
+# ignores remappings.txt entirely). Pin EVK's OZ 5.0.2 — the 1.7.1 resolution — which
+# has ERC1967Utils.sol needed by openzeppelin-contracts-upgradeable 5.2.0.
+remappings = ["@openzeppelin/contracts/=lib/euler-vault-kit/lib/openzeppelin-contracts/contracts/"]
+
 optimizer = true
 optimizer_runs = 20_000
 solc = "0.8.28"
@@ -84,42 +90,3 @@ gas_reports = ["*"]
 # Settings for Base network
 eth_rpc_url = "https://gateway.tenderly.co/public/base"
 match-path = "test/base/**"
-
-
-[profile.sonic]
-# Defaults
-src = "src"
-out = "out"
-libs = ["lib"]
-
-optimizer = true
-optimizer_runs = 20_000
-solc = "0.8.28"
-
-evm_version = "Cancun"
-
-fs_permissions = [{ access = "read-write", path = "./"}]
-
-gas_reports = ["*"]
-# Settings for Sonic network
-eth_rpc_url = "https://rpc.soniclabs.com"
-match-path = "test/sonic/**"
-
-[profile.plasma]
-# Defaults
-src = "src"
-out = "out"
-libs = ["lib"]
-
-optimizer = true
-optimizer_runs = 20_000
-solc = "0.8.28"
-
-evm_version = "Cancun"
-
-fs_permissions = [{ access = "read-write", path = "./"}]
-
-gas_reports = ["*"]
-# Settings for XPL network
-eth_rpc_url = "https://plasma.drpc.org"
-match-path = "test/twyne/plasma/**"

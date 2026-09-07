@@ -8,7 +8,6 @@ import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {LiquidationMath} from "./LiquidationMath.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
-import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {EulerTestBase} from "./EulerTestBase.t.sol";
 import {console2} from "forge-std/console2.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
@@ -111,9 +110,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         //Pre-setup
         uint16 minLTV = IEVault(eulerUSDC).LTVLiquidation(eulerWETH);
         address intermediateVault = intermediateVaultFor[eulerWETH];
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault);
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(intermediateVault, USDC);
         require(uint256(minLTV) * uint256(extLiqBuffer) <= uint256(twyneLTV) * MAXFACTOR, "precond fail");
-        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault), "twyneLTV too high");
+        require(twyneLTV <= twyneVaultManager.maxTwyneLTVs(intermediateVault, USDC), "twyneLTV too high");
 
         // Bob deposits into eeWETH_intermediate_vault to earn boosted yield
         vm.startPrank(bob);
@@ -123,12 +122,10 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
         vm.startPrank(alice);
         alice_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLTV, //this is 9000 then 8600
-                _targetAsset: address(0)
+                _liqLTV: twyneLTV //this is 9000 then 8600
             })
         );
 
@@ -219,7 +216,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     function test_e_expectRevert_internalLiquidation_case00() external noGasMetering {
         // Case 0: λ_t ≤ β_safe * λ̃_e
-        createInitialPosition(5e18, 0, 16000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         vm.warp(block.timestamp + 1);
 
@@ -236,7 +233,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     //LTV at limit upper limit before interpolation
     function test_e_expectRevert_internalLiquidation_case01() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         vm.warp(block.timestamp + 1);
 
@@ -251,13 +248,63 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         vm.stopPrank();
     }
 
+
+    // _setBorrower(liquidator) in liquidate() rejects subaccount liquidators regardless of
+    // interaction order, mirroring the borrower-side gate (see EulerTestEdgeCases.t.sol).
+    function test_e_revert_subAccountLiquidatorRejected() external noGasMetering {
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
+
+        //Makes position liquidatable
+        executePriceDrop(7);
+
+        setup_approve_customSetup();
+
+        address liquidatorSub1 = getSubAccount(liquidator, 1);
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](1);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: liquidatorSub1,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.liquidate, ())
+        });
+
+        // (a) Unclaimed-prefix attempt: EVC lazily registers liquidator as prefix owner inside
+        // authenticateCaller before the vault call runs, so _setBorrower still rejects; the
+        // reverted batch also rolls back the registration.
+        vm.startPrank(liquidator);
+        vm.expectRevert(TwyneErrors.SubAccountBlocked.selector);
+        evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(evc.getAccountOwner(liquidatorSub1), address(0), "atomic rollback: prefix still unclaimed");
+        assertEq(alice_collateral_vault.borrower(), alice, "borrower unchanged");
+        assertEq(collateralVaultFactory.getCollateralVaults(liquidatorSub1).length, 0);
+
+        // (b) Claimed-prefix attempt: liquidator registers her prefix, then retries.
+        vm.prank(liquidator);
+        evc.setAccountOperator(liquidator, makeAddr("unusedOperator"), true); // registers prefix owner
+        assertEq(evc.getAccountOwner(liquidatorSub1), liquidator);
+
+        vm.startPrank(liquidator);
+        vm.expectRevert(TwyneErrors.SubAccountBlocked.selector);
+        evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(alice_collateral_vault.borrower(), alice, "borrower unchanged");
+        assertEq(collateralVaultFactory.getCollateralVaults(liquidatorSub1).length, 0);
+
+        // Positive control: the primary account still liquidates the same position.
+        executeLiquidationWithRepay();
+        assertEq(alice_collateral_vault.borrower(), liquidator, "primary liquidator takes over");
+    }
+
     //Case 1: β_safe * λ̃_e < λ_t < λ̃_t^max (Interpolation Range)
 
     function test_e_internalLiquidation_case10() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
 
         //Makes position liquidatable
-        executePriceDrop(5);
+        executePriceDrop(7);
 
         //Checks if position is in interpolation range
         _assertInterpolating();
@@ -276,9 +323,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_case11() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
 
-        executePriceDrop(7);
+        executePriceDrop(10);
 
         //Checks if position is in interpolation range
         _assertInterpolating();
@@ -297,9 +344,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_case12() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
 
-        executePriceDrop(10);
+        executePriceDrop(12);
         //Checks if position is in interpolation range
         _assertInterpolating();
 
@@ -317,10 +364,10 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_case13() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
 
         // Makes position liquidatable
-        executePriceDrop(12);
+        executePriceDrop(13);
 
         // Approves collateral vault to be used for liquidation
         setup_approve_customSetup();
@@ -338,26 +385,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     // Case 14 & 15 proof that results are the same as case 12 & 13, but different liq ltv
     // this validates the idea that inteporlation is not affected by liq ltv
     function test_e_internalLiquidation_case14() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
-
-        // Makes position liquidatable
-        executePriceDrop(10);
-
-        // Approves collateral vault to be used for liquidation
-        setup_approve_customSetup();
-
-        // Snapshot before - this will log all the LTV details
-        LiquidationSnapshot memory snapshot = _snapshotBeforeLiquidation();
-
-        // Execute liquidation + repay batch
-        executeLiquidationWithRepay();
-
-        // Assert all changes
-        _assertAfterLiquidationAndRepay(snapshot);
-    }
-
-    function test_e_internalLiquidation_case15() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         // Makes position liquidatable
         executePriceDrop(12);
@@ -375,12 +403,31 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         _assertAfterLiquidationAndRepay(snapshot);
     }
 
+    function test_e_internalLiquidation_case15() external noGasMetering {
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
+
+        // Makes position liquidatable
+        executePriceDrop(13);
+
+        // Approves collateral vault to be used for liquidation
+        setup_approve_customSetup();
+
+        // Snapshot before - this will log all the LTV details
+        LiquidationSnapshot memory snapshot = _snapshotBeforeLiquidation();
+
+        // Execute liquidation + repay batch
+        executeLiquidationWithRepay();
+
+        // Assert all changes
+        _assertAfterLiquidationAndRepay(snapshot);
+    }
+
     /////Case 3: λ_t > λ̃_t^max (Fully Liquidated Range)
 
     function test_e_internalLiquidation_case20() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
-        executePriceDrop(13);
+        executePriceDrop(14);
 
         setup_approve_customSetup();
 
@@ -392,7 +439,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_case21() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         executePriceDrop(16);
 
@@ -406,7 +453,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_case22() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         executePriceDrop(18);
 
@@ -425,13 +472,13 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     // _lowValues cases are meant to compare deviation between python and solidity
 
     function test_e_internalLiquidation_lowValues_case10() external noGasMetering {
-        createInitialPosition(1e15, 0, 32e5, 8500);
+        createInitialPosition(1e15, 0, 14e5, 8600);
 
         //Makes position liquidatable
-        executePriceDrop(5);
+        executePriceDrop(7);
 
         // Trace liquidation math for Python comparison
-        _traceLiquidationMathCurrentState("LowValues Case10 (5% drop)");
+        _traceLiquidationMathCurrentState("LowValues Case10 (7% drop)");
 
         //Checks if position is in interpolation range
         _assertInterpolating();
@@ -450,12 +497,12 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_lowValues_case11() external noGasMetering {
-        createInitialPosition(1e15, 0, 32e5, 8500);
+        createInitialPosition(1e15, 0, 14e5, 8600);
 
-        executePriceDrop(7);
+        executePriceDrop(10);
 
         // Trace liquidation math for Python comparison
-        _traceLiquidationMathCurrentState("LowValues Case11 (7% drop)");
+        _traceLiquidationMathCurrentState("LowValues Case11 (10% drop)");
 
         //Checks if position is in interpolation range
         _assertInterpolating();
@@ -474,12 +521,12 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_lowValues_case12() external noGasMetering {
-        createInitialPosition(1e15, 0, 32e5, 8500);
+        createInitialPosition(1e15, 0, 14e5, 8600);
 
-        executePriceDrop(10);
+        executePriceDrop(12);
 
         // Trace liquidation math for Python comparison
-        _traceLiquidationMathCurrentState("LowValues Case12 (10% drop)");
+        _traceLiquidationMathCurrentState("LowValues Case12 (12% drop)");
 
         //Checks if position is in interpolation range
         _assertInterpolating();
@@ -498,13 +545,13 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     }
 
     function test_e_internalLiquidation_lowValues_case13() external noGasMetering {
-        createInitialPosition(1e15, 0, 32e5, 8500);
+        createInitialPosition(1e15, 0, 14e5, 8600);
 
         // Makes position liquidatable
-        executePriceDrop(12);
+        executePriceDrop(13);
 
         // Trace liquidation math for Python comparison
-        _traceLiquidationMathCurrentState("LowValues Case13 (12% drop)");
+        _traceLiquidationMathCurrentState("LowValues Case13 (13% drop)");
 
         // Approves collateral vault to be used for liquidation
         setup_approve_customSetup();
@@ -549,9 +596,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         uint256 rawBase = LiquidationMath.borrowerCollateralBase(
             B,
             C,
-            twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault)),
+            twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault), USDC),
             IEVault(eulerUSDC).LTVLiquidation(eulerWETH),
-            twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault))
+            twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault), USDC)
         );
         console2.log("LiquidationMath raw base", rawBase);
         if (rawBase == 0) {
@@ -584,40 +631,40 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         address assetAddr = vault.asset();
         address underlyingAsset = IEVault(assetAddr).asset();
 
-        underlyingAmount = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(collateralValue, unitOfAccount, underlyingAsset);
+        underlyingAmount = oracleRouter.getQuote(collateralValue, unitOfAccount, underlyingAsset);
         uint256 convertedShares = IEVault(assetAddr).convertToShares(underlyingAmount);
         uint256 cap = vault.totalAssetsDepositedOrReserved() - vault.maxRelease();
         shareAmount = Math.min(cap, convertedShares);
-        pricePerUnit = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(1e18, unitOfAccount, underlyingAsset);
+        pricePerUnit = oracleRouter.getQuote(1e18, unitOfAccount, underlyingAsset);
         shareExchangeRate = underlyingAmount > 0 ? convertedShares * 1e18 / underlyingAmount : 0;
     }
 
     function test_liquidationMathUSD_case10() external noGasMetering {
-        _traceLiquidationMath("Case10 (5% drop)", 5, 5e18, 0, 16_000e6, 8500);
+        _traceLiquidationMath("Case10 (7% drop)", 7, 5e18, 0, BORROW_USD_AMOUNT, 8600);
     }
 
     function test_liquidationMathUSD_case11() external noGasMetering {
-        _traceLiquidationMath("Case11 (7% drop)", 7, 5e18, 0, 16_000e6, 8500);
+        _traceLiquidationMath("Case11 (10% drop)", 10, 5e18, 0, BORROW_USD_AMOUNT, 8600);
     }
 
     function test_liquidationMathUSD_case12() external noGasMetering {
-        _traceLiquidationMath("Case12 (10% drop)", 10, 5e18, 0, 16_000e6, 8500);
+        _traceLiquidationMath("Case12 (12% drop)", 12, 5e18, 0, BORROW_USD_AMOUNT, 8600);
     }
 
     function test_liquidationMathUSD_case13() external noGasMetering {
-        _traceLiquidationMath("Case13 (12% drop)", 12, 5e18, 0, 16_000e6, 8500);
+        _traceLiquidationMath("Case13 (13% drop)", 13, 5e18, 0, BORROW_USD_AMOUNT, 8600);
     }
 
     function test_liquidationMathUSD_case20() external noGasMetering {
-        _traceLiquidationMath("Case20 (13% drop, twyneLTV 90%)", 13, 5e18, 0, 16_000e6, 9000);
+        _traceLiquidationMath("Case20 (14% drop, twyneLTV 90%)", 14, 5e18, 0, BORROW_USD_AMOUNT, 9000);
     }
 
     function test_liquidationMathUSD_case21() external noGasMetering {
-        _traceLiquidationMath("Case21 (16% drop, twyneLTV 90%)", 16, 5e18, 0, 16_000e6, 9000);
+        _traceLiquidationMath("Case21 (16% drop, twyneLTV 90%)", 16, 5e18, 0, BORROW_USD_AMOUNT, 9000);
     }
 
     function test_liquidationMathUSD_case22() external noGasMetering {
-        _traceLiquidationMath("Case22 (18% drop, twyneLTV 90%)", 18, 5e18, 0, 16_000e6, 9000);
+        _traceLiquidationMath("Case22 (18% drop, twyneLTV 90%)", 18, 5e18, 0, BORROW_USD_AMOUNT, 9000);
     }
 
     //Corner Cases
@@ -625,7 +672,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
     //This case prove that if current ltv > 100% (in this case 100108209(1e8 precision))
     //the liquidator can liquidate position, BUT he loses money
     function test_e_internalLiquidation_case_ltv_higher_than_max() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         executePriceDrop(19);
 
@@ -640,7 +687,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     //Same as above, but with different liq ltv
     function test_e_internalLiquidation_insolvency() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         executePriceDrop(40);
 
@@ -716,17 +763,17 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
         // Set Safety Buffer (β_safe) = 99% = 0.990
         // externalLiqBuffer = 0.99e4 = 9900
-        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.99e4, 0); // 99%
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), USDC, 0.99e4, 0); // 99%
 
         // Set Max Twyne Liquidation LTV (λ̃_t^max) = 97% = 0.97
         // maxTwyneLTVs = 0.97e4 = 9700
-        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 0.97e4, 0); // 97%
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), USDC, 0.97e4, 0); // 97%
 
         vm.stopPrank();
 
         // Verify the parameters are set correctly
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault));
-        uint16 maxLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault));
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault), USDC);
+        uint16 maxLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault), USDC);
 
         assertEq(extLiqBuffer, 9900, "Safety buffer should be 99%");
         assertEq(maxLTV, 9700, "Max LTV should be 97%");
@@ -737,7 +784,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         address uoa = IEVault(eeWETH_intermediate_vault).unitOfAccount();
 
         // Step 2: Get the current WETH price in USD
-        uint256 wethPriceUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        uint256 wethPriceUSD = oracleRouter.getQuote(
             1e18, // 1 WETH (18 decimals)
             eulerWETH,
             uoa // USD unit of account
@@ -796,7 +843,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         preLiquidation.uoa = IEVault(alice_collateral_vault.intermediateVault()).unitOfAccount();
         preLiquidation.collateralUSD = C_final;
         preLiquidation.borrowedUSD = B_final;
-        preLiquidation.clpReservedUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        preLiquidation.clpReservedUSD = oracleRouter.getQuote(
             alice_collateral_vault.maxRelease(), alice_collateral_vault.asset(), preLiquidation.uoa
         );
         preLiquidation.twyneLTV = (B_final * MAXFACTOR) / C_final;
@@ -854,12 +901,12 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // Convert eWETH shares → WETH → USD (to match original interpolation USD value)
         postLiquidation.borrowerWETHReceived =
             IEVault(assetAddr).convertToAssets(postLiquidation.borrowerSharesReceived);
-        postLiquidation.borrowerCollateralReceivedUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.borrowerCollateralReceivedUSD = oracleRouter.getQuote(
             postLiquidation.borrowerWETHReceived, underlyingAsset, preLiquidation.uoa
         );
 
         // Also quote eWETH directly for comparison (contract's _getBC() pattern)
-        postLiquidation.borrowerUSD_viaEWETH = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.borrowerUSD_viaEWETH = oracleRouter.getQuote(
             postLiquidation.borrowerSharesReceived, assetAddr, preLiquidation.uoa
         );
 
@@ -874,13 +921,13 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // Use: eWETH price directly (matching contract's _getBC() pattern)
         postLiquidation.userCollateralShares =
             alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
-        postLiquidation.vaultCollateralUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.vaultCollateralUSD = oracleRouter.getQuote(
             postLiquidation.userCollateralShares, assetAddr, preLiquidation.uoa
         );
 
         // Get debt paid (convert USDC to USD)
         postLiquidation.debtPaidUSD =
-            EulerRouter(twyneVaultManager.oracleRouter()).getQuote(debt, eulerUSDC, preLiquidation.uoa);
+            oracleRouter.getQuote(debt, eulerUSDC, preLiquidation.uoa);
 
         // Calculate net collateral (C - debt paid)
         postLiquidation.netCollateralUSD = postLiquidation.vaultCollateralUSD > postLiquidation.debtPaidUSD
@@ -889,7 +936,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
         // Get CLP after liquidation - use eWETH price directly (matching contract's approach)
         postLiquidation.clpShares = alice_collateral_vault.maxRelease();
-        postLiquidation.clpUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.clpUSD = oracleRouter.getQuote(
             postLiquidation.clpShares, assetAddr, preLiquidation.uoa
         );
 
@@ -957,16 +1004,16 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         vm.startPrank(admin);
 
         // Set Safety Buffer (β_safe) = 99% = 0.990
-        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 0.99e4, 0); // 99%
+        twyneVaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), USDC, 0.99e4, 0); // 99%
 
         // Set Max Twyne Liquidation LTV (λ̃_t^max) = 97% = 0.97
-        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 0.97e4, 0); // 97%
+        twyneVaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), USDC, 0.97e4, 0); // 97%
 
         vm.stopPrank();
 
         // Verify the parameters are set correctly
-        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault));
-        uint16 maxLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault));
+        uint16 extLiqBuffer = twyneVaultManager.externalLiqBuffers(address(eeWETH_intermediate_vault), USDC);
+        uint16 maxLTV = twyneVaultManager.maxTwyneLTVs(address(eeWETH_intermediate_vault), USDC);
 
         assertEq(extLiqBuffer, 9900, "Safety buffer should be 99%");
         assertEq(maxLTV, 9700, "Max LTV should be 97%");
@@ -976,7 +1023,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         address uoa = IEVault(eeWETH_intermediate_vault).unitOfAccount();
 
         // Step 2: Get the current WETH price in USD
-        uint256 wethPriceUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        uint256 wethPriceUSD = oracleRouter.getQuote(
             1e18, // 1 WETH (18 decimals)
             eulerWETH,
             uoa // USD unit of account
@@ -1033,7 +1080,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         preLiquidation.uoa = IEVault(alice_collateral_vault.intermediateVault()).unitOfAccount();
         preLiquidation.collateralUSD = C_final;
         preLiquidation.borrowedUSD = B_final;
-        preLiquidation.clpReservedUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        preLiquidation.clpReservedUSD = oracleRouter.getQuote(
             alice_collateral_vault.maxRelease(), alice_collateral_vault.asset(), preLiquidation.uoa
         );
         preLiquidation.twyneLTV = (B_final * MAXFACTOR) / C_final;
@@ -1087,12 +1134,12 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // Convert eWETH shares → WETH → USD (to match original interpolation USD value)
         postLiquidation.borrowerWETHReceived =
             IEVault(assetAddr).convertToAssets(postLiquidation.borrowerSharesReceived);
-        postLiquidation.borrowerCollateralReceivedUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.borrowerCollateralReceivedUSD = oracleRouter.getQuote(
             postLiquidation.borrowerWETHReceived, underlyingAsset, preLiquidation.uoa
         );
 
         // Also quote eWETH directly for comparison (contract's _getBC() pattern)
-        postLiquidation.borrowerUSD_viaEWETH = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.borrowerUSD_viaEWETH = oracleRouter.getQuote(
             postLiquidation.borrowerSharesReceived, assetAddr, preLiquidation.uoa
         );
 
@@ -1107,13 +1154,13 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // Use: eWETH price directly (matching contract's _getBC() pattern)
         postLiquidation.userCollateralShares =
             alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
-        postLiquidation.vaultCollateralUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.vaultCollateralUSD = oracleRouter.getQuote(
             postLiquidation.userCollateralShares, assetAddr, preLiquidation.uoa
         );
 
         // Get debt paid (convert USDC to USD)
         postLiquidation.debtPaidUSD =
-            EulerRouter(twyneVaultManager.oracleRouter()).getQuote(debt, eulerUSDC, preLiquidation.uoa);
+            oracleRouter.getQuote(debt, eulerUSDC, preLiquidation.uoa);
 
         // Calculate net collateral (C - debt paid)
         postLiquidation.netCollateralUSD = postLiquidation.vaultCollateralUSD > postLiquidation.debtPaidUSD
@@ -1122,7 +1169,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
         // Get CLP after liquidation - use eWETH price directly (matching contract's approach)
         postLiquidation.clpShares = alice_collateral_vault.maxRelease();
-        postLiquidation.clpUSD = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+        postLiquidation.clpUSD = oracleRouter.getQuote(
             postLiquidation.clpShares, assetAddr, preLiquidation.uoa
         );
 
@@ -1145,9 +1192,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     /// @notice Helper function to trace interpolation math and check sensitivity
     function _traceInterpolationMath(uint256 B, uint256 C) internal view {
-        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
+        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset()))
             * uint256(IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset())); // 1e8 precision
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()))); // 1e4 precision
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset())); // 1e4 precision
 
         uint256 currentLTV_bps = (B * MAXFACTOR) / C;
 
@@ -1187,7 +1234,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
             address underlyingAsset = IEVault(assetAddr).asset(); // Get underlying WETH, not eWETH vault
 
             // Step 1: Convert USD to underlying WETH via oracle (same as _convertBaseToCollateral)
-            trace.collateralAmount_WETH = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+            trace.collateralAmount_WETH = oracleRouter.getQuote(
                 trace.resultBeforeConversion,
                 uoa,
                 underlyingAsset // Use underlying WETH, not eWETH vault
@@ -1224,7 +1271,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
             python.pythonResultBeforeConversion = python.pythonBaseResult - python.pythonPenalty;
 
             // Trace Python's conversion
-            python.pythonCollateralAmount_WETH = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+            python.pythonCollateralAmount_WETH = oracleRouter.getQuote(
                 python.pythonResultBeforeConversion,
                 uoa,
                 underlyingAsset // Use underlying WETH
@@ -1292,7 +1339,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         uint256 B, // debt (fuzzed)
         uint256 C // collateral (fuzzed)
     ) public {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         // Bound inputs to reasonable ranges that won't cause oracle issues
         // Both B and C are in USD/unit of account (same units as _getBC() returns)
@@ -1315,7 +1362,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         assertGe(result, 0, "Result negative");
 
         // 2. If fully liquidated (LTV >= maxLTV_t), result should be 0
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault())));
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset()));
         if (MAXFACTOR * B >= maxLTV_t * C) {
             assertEq(result, 0, "Fully liquidated position should return 0");
         }
@@ -1345,13 +1392,13 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         collateralAmount = bound(collateralAmount, 1e18, 7e18); // 1 to 7 ETH
 
         // 2. Fixed valid twyneLTV
-        twyneLTV = uint16(bound(twyneLTV, 8500, 9300));
+        twyneLTV = uint16(bound(twyneLTV, 8600, 9300));
 
         // 2. Calculate max debt based on collateral amount
-        // Conservative estimate: 1 WETH ≈ $3000, max LTV = 90%
+        // Conservative estimate: 1 WETH ≈ $1500, max LTV = 90%
         // Max debt = collateral * price * LTV
-        // C (18 decimals) * 3000e6 (USDC, 6 decimals) * 9000 / 10000 / 1e18
-        uint256 maxDebtForCollateral = (collateralAmount * 3500e6 * twyneLTV) / (1e18 * 10000);
+        // C (18 decimals) * 1500e6 (USDC, 6 decimals) * 9000 / 10000 / 1e18
+        uint256 maxDebtForCollateral = (collateralAmount * 1500e6 * twyneLTV) / (1e18 * 10000);
         // Ensure minimum debt of 1 USDC and cap at reasonable maximum
         uint256 minDebt = 1e6;
         uint256 maxDebt = maxDebtForCollateral < 10_000e6 ? maxDebtForCollateral : 10_000e6;
@@ -1394,7 +1441,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     /// @notice Test that borrower cannot liquidate their own position
     function test_e_expectRevert_selfLiquidation() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
 
         // Makes position liquidatable
         executePriceDrop(10);
@@ -1410,7 +1457,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     /// @notice Test that liquidate() reverts when vault is externally liquidated
     function test_e_expectRevert_externallyLiquidated() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 8500);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 8600);
 
         // Makes position liquidatable with 30% price drop
         executePriceDrop(30);
@@ -1457,7 +1504,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
 
     /// @notice Test that liquidate() reverts when vault is healthy (not liquidatable)
     function test_e_expectRevert_healthyNotLiquidatable() external noGasMetering {
-        createInitialPosition(5e18, 0, 16_000e6, 9000);
+        createInitialPosition(5e18, 0, BORROW_USD_AMOUNT, 9000);
 
         vm.warp(block.timestamp + 1);
 
@@ -1495,7 +1542,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // Convert that collateral to the same unit of account via the oracle, exactly like `_canLiquidate()`
         address uoa = IEVault(alice_collateral_vault.intermediateVault()).unitOfAccount();
         uint256 userCollateralValue =
-            EulerRouter(twyneVaultManager.oracleRouter()).getQuote(userCollateral, alice_collateral_vault.asset(), uoa);
+            oracleRouter.getQuote(userCollateral, alice_collateral_vault.asset(), uoa);
         require(userCollateralValue > 0, "zero collateral value");
 
         // This reproduces the LTV calculation implicit in `_canLiquidate()`’s second inequality
@@ -1506,12 +1553,12 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         // These compute the thresholds so we can assert the state is in the interpolation band.
 
         // β_safe * λ̃_e (same values `_canLiquidate()` uses, but here we convert to bps for direct comparison)
-        uint256 safeThresholdRaw = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
+        uint256 safeThresholdRaw = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset()))
             * IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset());
         uint256 safeThresholdBps = safeThresholdRaw / MAXFACTOR;
 
         // Twyne’s max liquidation LTV; same value the contract enforces when setting the vault’s LTV
-        uint256 maxTwyneLTV = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault())));
+        uint256 maxTwyneLTV = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset()));
 
         // --- Final assertion ----------------------------------------------------------
         // Ensure we’re strictly inside the interpolation window:
@@ -1537,7 +1584,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         uint256 userCollateral =
             alice_collateral_vault.totalAssetsDepositedOrReserved() - alice_collateral_vault.maxRelease();
         address uoa = IEVault(alice_collateral_vault.intermediateVault()).unitOfAccount();
-        C = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(userCollateral, alice_collateral_vault.asset(), uoa);
+        C = oracleRouter.getQuote(userCollateral, alice_collateral_vault.asset(), uoa);
     }
 
     /// @notice Snapshots all relevant state before liquidation and repay
@@ -1556,9 +1603,9 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         (uint256 B, uint256 C) = _getBC();
 
         // Calculate interpolation parameters to prove interpolation is working
-        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
+        uint256 liqLTV_e = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset()))
             * uint256(IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset())); // 1e8 precision
-        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()))); // 1e4 precision
+        uint256 maxLTV_t = uint256(twyneVaultManager.maxTwyneLTVs(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset())); // 1e4 precision
 
         // Current LTV in same units as liqLTV_e (1e8 precision)
         // The condition in collateralForBorrower is: MAXFACTOR * MAXFACTOR * B <= liqLTV_e * C
@@ -1654,7 +1701,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
         uint256 currentLTV = 0;
         if (userCollateral > 0) {
             address uoa = IEVault(alice_collateral_vault.intermediateVault()).unitOfAccount();
-            uint256 userCollateralValue = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+            uint256 userCollateralValue = oracleRouter.getQuote(
                 userCollateral, alice_collateral_vault.asset(), uoa
             );
             (, uint256 externalBorrowDebtValue) =
@@ -1665,7 +1712,7 @@ contract EulerTestInternalLiquidation is EulerTestBase {
             }
         }
 
-        uint256 safeThresholdBps = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault())))
+        uint256 safeThresholdBps = uint256(twyneVaultManager.externalLiqBuffers(address(alice_collateral_vault.intermediateVault()), alice_collateral_vault.targetAsset()))
             * IEVault(eulerUSDC).LTVLiquidation(alice_collateral_vault.asset()) / MAXFACTOR;
 
         assertLe(currentLTV, safeThresholdBps, "LTV should be below safe threshold after repay");

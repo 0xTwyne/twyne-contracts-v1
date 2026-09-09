@@ -20,6 +20,7 @@ import {IPool as IAaveV3Pool} from "aave-v3/interfaces/IPool.sol";
 import {IERC20Permit} from "openzeppelin-contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {IERC4626StataToken, IAaveV3ATokenWrapper} from "src/interfaces/IAaveV3ATokenWrapper.sol";
 import {AssetZapFrontendHelper, IWstETH, IPendleMarket, IPendleRouter, PendleTokenInput, PendleSwapData} from "../AssetZapFrontendHelper.sol";
+import {WstethHandler} from "src/operators/handlers/WstethHandler.sol";
 import {AssetZap} from "src/Periphery/AssetZap.sol";
 import {IVault, IERC4626} from "euler-vault-kit/EVault/IEVault.sol";
 
@@ -743,6 +744,105 @@ contract AaveFrontendTests is AaveTestBase {
     // Each flow deposits credit (LP side) — borrow flows are shown in the tests above.
     // ---------------------------------------------------------------------------------------------
 
+    /// @notice ETH -> WETH asset-zap into the aWETH intermediate vault.
+    /// @dev Item 0 wraps ETH 1:1 to WETH via the handler and airdrops it on AssetZap; item 1 zaps in
+    ///      airdrop mode (amountIn == 0) with no swap since WETH is the IV underlying.
+    function test_aave_frontend_assetZap_ETH_to_WETH() public noGasMetering {
+        IEVault intermediateVault = IEVault(intermediateVaultFor[address(aWETHWrapper)]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            // WETH is airdropped; the Swapper sweeps it to the IV's wrapper and skims it into wrapper shares before the deposit.
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, 0, address(intermediateVault), 1))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        uint256 shares = intermediateVault.balanceOf(alice);
+        assertGt(shares, 0, "alice credited IV shares");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
+    /// @notice ETH -> wstETH asset-zap into the aWSTETH intermediate vault.
+    /// @dev Item 0 wraps ETH to WETH (handler); item 1 zaps WETH with a Generic-handler swap routing
+    ///      WETH -> wstETH via the EVK Swapper before the deposit.
+    function test_aave_frontend_assetZap_ETH_to_WSTETH() public noGasMetering {
+        IEVault intermediateVault = IEVault(intermediateVaultFor[address(aWSTETHWrapper)]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+
+        // Route: WstethHandler delivers wstETH directly to the wrapper (step 1), then a Generic-handler
+        // skim absorbs it into wrapper shares at AssetZap (step 2).
+        address wrapper = intermediateVault.asset();
+        bytes[] memory step1 = AssetZapFrontendHelper.genericSwap(
+            WETH, WSTETH, address(handler), abi.encodeCall(WstethHandler.wrapWETH, (amountIn, wrapper))
+        );
+        bytes[] memory step2 = AssetZapFrontendHelper.genericSwap(
+            WSTETH, wrapper, wrapper, abi.encodeCall(IAaveV3ATokenWrapper.skim, (address(assetZap)))
+        );
+        bytes[] memory swapData = new bytes[](2);
+        swapData[0] = step1[0];
+        swapData[1] = step2[0];
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(
+                AssetZap.zap,
+                (WETH, 0, swapData, address(intermediateVault), 1)
+            )
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        uint256 shares = intermediateVault.balanceOf(alice);
+        assertGt(shares, 0, "alice credited IV shares");
+        // wstETH that reached the IV's asset (aWSTETH wrapper) tracks the staked amount.
+        uint256 wstEthDeposited = IAaveV3ATokenWrapper(wrapper).convertToAssets(intermediateVault.convertToAssets(shares));
+        assertApproxEqRel(wstEthDeposited, expectedWstEth, 1e12, "staked wstETH deposited at the protocol rate");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(IERC20(WSTETH).balanceOf(address(assetZap)), 0, "no wstETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
     /// @notice USDe -> PT-srUSDe asset-zap into the live Aave PT-srUSDe intermediate vault.
     /// @dev The zap swaps USDe -> PT via the real Pendle router (EVK Swapper Generic handler), then deposits
     ///      PT into the live IV's asset (the wrapper's underlying is raw PT-srUSDe). The live vault only accepts
@@ -815,6 +915,104 @@ contract AaveFrontendTests is AaveTestBase {
     //   Same swap routes as the IV tests above; only the destination and  //
     //   the final absorb step change (CV.skim() vs IV.skim(user)).        //
     // ------------------------------------------------------------------ //
+
+    /// @notice ETH -> WETH asset-zap into an Aave WETH collateral vault.
+    /// @dev WETH is airdropped (item 0), deposited into aWETH wrapper shares (item 1 zap), and the CV
+    ///      absorbs them via `CV.skim()` (item 2) instead of minting IV shares.
+    function test_aave_frontend_assetZap_ETH_to_WETH_CV() public noGasMetering {
+        address collateralAsset = address(aWETHWrapper);
+        aave_createCollateralVault(collateralAsset, uint16(twyneVaultManager.maxTwyneLTVs(intermediateVaultFor[collateralAsset], USDC)));
+        AaveV3CollateralVault cv = alice_aave_vault;
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+        address wrapper = intermediateVault.asset();
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, 0, address(cv), 1))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(cv),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(cv.skim, ())
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        assertGt(cv.totalAssetsDepositedOrReserved(), 0, "collateral credited");
+        assertGt(IERC20(wrapper).balanceOf(address(cv)), 0, "CV holds wrapper shares");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
+    /// @notice ETH -> wstETH asset-zap into an Aave wstETH collateral vault.
+    /// @dev Same WETH -> wstETH (handler) -> wrapper-shares route as the IV test; the CV absorbs via skim().
+    function test_aave_frontend_assetZap_ETH_to_WSTETH_CV() public noGasMetering {
+        address collateralAsset = address(aWSTETHWrapper);
+        aave_createCollateralVault(collateralAsset, uint16(twyneVaultManager.maxTwyneLTVs(intermediateVaultFor[collateralAsset], USDC)));
+        AaveV3CollateralVault cv = alice_aave_vault;
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+        address wrapper = intermediateVault.asset();
+
+        bytes[] memory step1 = AssetZapFrontendHelper.genericSwap(
+            WETH, WSTETH, address(handler), abi.encodeCall(WstethHandler.wrapWETH, (amountIn, wrapper))
+        );
+        bytes[] memory step2 = AssetZapFrontendHelper.genericSwap(
+            WSTETH, wrapper, wrapper, abi.encodeCall(IAaveV3ATokenWrapper.skim, (address(assetZap)))
+        );
+        bytes[] memory swapData = new bytes[](2);
+        swapData[0] = step1[0];
+        swapData[1] = step2[0];
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zap, (WETH, 0, swapData, address(cv), 1))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(cv),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(cv.skim, ())
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+        assertGt(cv.totalAssetsDepositedOrReserved(), 0, "collateral credited");
+        // The CV auto-reserves credit on deposit (boosted yield), so only the user-owned collateral
+        // (totalAssetsDepositedOrReserved - maxRelease) corresponds to the staked wstETH.
+        assertApproxEqRel(IAaveV3ATokenWrapper(wrapper).convertToAssets(cv.totalAssetsDepositedOrReserved() - cv.maxRelease()), expectedWstEth, 1e12, "staked wstETH deposited at the protocol rate");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(IERC20(WSTETH).balanceOf(address(assetZap)), 0, "no wstETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
 
     /// @notice USDe -> PT-srUSDe asset-zap into the live Aave PT-srUSDe collateral vault.
     /// @dev Mirrors the IV PT test: the same USDe -> PT -> wrapper swap airdrops wrapper shares at the CV,

@@ -19,6 +19,7 @@ import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {SafeERC20Lib} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
 import {AssetZap} from "src/Periphery/AssetZap.sol";
 import {IVault} from "euler-vault-kit/EVault/IEVault.sol";
+import {WstethHandler} from "src/operators/handlers/WstethHandler.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {MockPriceOracle} from "euler-vault-kit/../test/mocks/MockPriceOracle.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
@@ -1413,6 +1414,61 @@ contract EulerTestBase is MainnetBase {
             data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
         });
         evc.batch(items);
+    }
+
+    function e_depositETHToIntermediateVault(address collateralAssets) public {
+        vm.assume(isValidCollateralAsset(collateralAssets));
+
+        // ETH deposits route through WstethHandler (ETH -> WETH) via a value-carrying EVC batch item; only
+        // WETH-based intermediates are eligible.
+        address underlyingAsset = IEVault(collateralAssets).asset();
+
+        uint256 ethDepositAmount = 1 ether;
+        vm.deal(alice, ethDepositAmount);
+
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAssets]);
+
+        if (underlyingAsset != WETH) {
+            vm.stopPrank();
+            return;
+        }
+
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 aliceETHBefore = alice.balance;
+        uint256 aliceIntermediateSharesBefore = intermediateVault.balanceOf(alice);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: ethDepositAmount,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, 0, address(intermediateVault), 0))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.startPrank(alice);
+        evc.batch{value: ethDepositAmount}(items);
+        vm.stopPrank();
+
+        uint256 sharesReceived = intermediateVault.balanceOf(alice) - aliceIntermediateSharesBefore;
+
+        assertEq(alice.balance, aliceETHBefore - ethDepositAmount, "Alice ETH balance incorrect");
+        assertGt(sharesReceived, 0, "Should receive some shares");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "AssetZap should not hold WETH");
+        assertEq(IEVault(collateralAssets).balanceOf(address(assetZap)), 0, "AssetZap should not hold euler shares");
+        assertEq(address(assetZap).balance, 0, "AssetZap should not hold ETH");
     }
 
     // TODO Test the scenario where one user is a credit LP and a borrower at the same time

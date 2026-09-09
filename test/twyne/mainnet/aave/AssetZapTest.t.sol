@@ -6,6 +6,7 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IEVault, IVault, IERC4626} from "euler-vault-kit/EVault/IEVault.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {AssetZap} from "src/Periphery/AssetZap.sol";
+import {WstethHandler} from "src/operators/handlers/WstethHandler.sol";
 import {IAaveV3ATokenWrapper} from "src/interfaces/IAaveV3ATokenWrapper.sol";
 import {IErrors} from "src/interfaces/IErrors.sol";
 import {AssetZapFrontendHelper} from "../AssetZapFrontendHelper.sol";
@@ -122,6 +123,7 @@ contract AssetZapTest is Test {
     uint256 constant MAINNET_FORK_BLOCK = 25702611;
 
     AssetZap assetZap;
+    WstethHandler wstethHandler;
     MockSwapTarget mockTarget;
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
@@ -130,6 +132,7 @@ contract AssetZapTest is Test {
     function setUp() public {
         vm.rollFork(MAINNET_FORK_BLOCK);
         assetZap = new AssetZap(EVC, EVK_SWAPPER);
+        wstethHandler = new WstethHandler(WETH, WSTETH);
         mockTarget = new MockSwapTarget();
 
         // On a mainnet fork, makeAddr() can collide with LIVE contracts; force clean EOAs.
@@ -139,8 +142,10 @@ contract AssetZapTest is Test {
             vm.deal(actors[i], 0);
         }
         vm.deal(address(assetZap), 0);
+        vm.deal(address(wstethHandler), 0); // deterministic deploy address holds 1 wei of mainnet dust
 
         vm.label(address(assetZap), "AssetZap");
+        vm.label(address(wstethHandler), "WstethHandler");
         vm.label(EVK_SWAPPER, "EVKSwapper");
         vm.label(WSTETH, "wstETH");
         vm.label(USDE, "USDe");
@@ -176,7 +181,159 @@ contract AssetZapTest is Test {
         return SRUSDE;
     }
 
+    function _assertHandlerEmpty() internal view {
+        assertEq(IERC20(WSTETH).balanceOf(address(wstethHandler)), 0, "handler must hold no wstETH after a zap");
+        assertEq(IERC20(WETH).balanceOf(address(wstethHandler)), 0, "handler must hold no WETH after a zap");
+        assertEq(address(wstethHandler).balance, 0, "handler must hold no ETH after a zap");
+    }
+
     // --- happy paths ---
+
+    function test_ethToWstEth_viaHandlerSwap_eulerIV() public {
+        // ETH wraps to WETH via the handler (item 0), then the Swapper routes WETH -> wstETH via wrapWETH (item 1).
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+        uint256 swapperWethBefore = IERC20(WETH).balanceOf(EVK_SWAPPER);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(wstethHandler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zap, (WETH, 0, AssetZapFrontendHelper.wstethWrapSwapData(amountIn, IV_EULER_WSTETH.asset(), address(wstethHandler), abi.encodeCall(IVault.skim, (type(uint256).max, address(assetZap)))), address(IV_EULER_WSTETH), IERC4626(IV_EULER_WSTETH.asset()).convertToShares(expectedWstEth) * 99 / 100))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(IV_EULER_WSTETH),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        IEVC(EVC).batch{value: amountIn}(items);
+
+        uint256 shares = IV_EULER_WSTETH.balanceOf(alice);
+        assertGt(shares, 0, "IV shares credited to caller");
+        assertEq(IV_EULER_WSTETH.balanceOf(alice), shares);
+        IEVault inner = IEVault(IV_EULER_WSTETH.asset());
+        uint256 wstEthDeposited = inner.convertToAssets(IV_EULER_WSTETH.convertToAssets(shares));
+        assertApproxEqRel(wstEthDeposited, expectedWstEth, 1e12, "staked wstETH deposited at the protocol rate");
+        assertEq(IERC20(WETH).balanceOf(EVK_SWAPPER), swapperWethBefore, "Swapper retains no WETH from the handler");
+        _assertHandlerEmpty();
+        _assertNoResidue(WSTETH);
+    }
+
+    function test_ethToWstEth_viaHandlerSwap_aaveIV() public {
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(wstethHandler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zap, (WETH, 0, AssetZapFrontendHelper.wstethWrapSwapData(amountIn, IV_AAVE_WSTETH.asset(), address(wstethHandler), abi.encodeCall(IAaveV3ATokenWrapper.skim, (address(assetZap)))), address(IV_AAVE_WSTETH), IERC4626(IV_AAVE_WSTETH.asset()).convertToShares(expectedWstEth) * 99 / 100))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(IV_AAVE_WSTETH),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        IEVC(EVC).batch{value: amountIn}(items);
+
+        uint256 shares = IV_AAVE_WSTETH.balanceOf(alice);
+        assertGt(shares, 0);
+        assertEq(IV_AAVE_WSTETH.balanceOf(alice), shares);
+        address wrapper = IV_AAVE_WSTETH.asset();
+        uint256 wstEthDeposited = IAaveV3ATokenWrapper(wrapper).convertToAssets(IV_AAVE_WSTETH.convertToAssets(shares));
+        assertApproxEqRel(wstEthDeposited, expectedWstEth, 1e12);
+        _assertHandlerEmpty();
+        _assertNoResidue(WSTETH);
+    }
+
+    function test_ethToWstEth_viaEvcBatch_airdropMode() public {
+        // ETH -> wstETH without the Swapper: item 0 stakes the ETH at the protocol rate and delivers wstETH to AssetZap,
+        // item 2 zaps in airdrop mode (amountIn == 0 pulls nothing; the deposit picks up the delivery).
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+        uint256 evcEthBefore = EVC.balance;
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(wstethHandler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WSTETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WSTETH, 0, address(IV_EULER_WSTETH), IERC4626(IV_EULER_WSTETH.asset()).convertToShares(expectedWstEth) * 99 / 100))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(IV_EULER_WSTETH),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        IEVC(EVC).batch{value: amountIn}(items);
+
+        uint256 shares = IV_EULER_WSTETH.balanceOf(alice);
+        assertGt(shares, 0, "IV shares credited to the batch caller");
+        IEVault inner = IEVault(IV_EULER_WSTETH.asset());
+        uint256 wstEthDeposited = inner.convertToAssets(IV_EULER_WSTETH.convertToAssets(shares));
+        assertApproxEqRel(wstEthDeposited, expectedWstEth, 1e12, "staked wstETH deposited at the protocol rate");
+        assertEq(EVC.balance, evcEthBefore, "EVC retains no ETH from the batch");
+        _assertHandlerEmpty();
+        _assertNoResidue(WSTETH);
+    }
+
+    function test_airdropMode_viaSwap() public {
+        // Airdrop mode + swap: WETH delivered to AssetZap ahead of the zap (amountIn == 0 pulls nothing);
+        // the full delivered balance is routed through the Swapper, staked to wstETH, and deposited.
+        uint256 wethAmount = 1 ether;
+        vm.deal(address(this), wethAmount);
+        (bool ok,) = WETH.call{value: wethAmount}("");
+        require(ok, "weth wrap failed");
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(wethAmount);
+        IERC20(WETH).transfer(address(assetZap), wethAmount);
+
+        vm.prank(alice);
+        assetZap.zap(WETH, 0, AssetZapFrontendHelper.wstethWrapSwapData(wethAmount, IV_EULER_WSTETH.asset(), address(wstethHandler), abi.encodeCall(IVault.skim, (type(uint256).max, address(assetZap)))), address(IV_EULER_WSTETH), IERC4626(IV_EULER_WSTETH.asset()).convertToShares(expectedWstEth) * 99 / 100);
+        uint256 shares = IV_EULER_WSTETH.skim(type(uint).max, alice);
+
+        assertGt(shares, 0);
+        assertEq(IV_EULER_WSTETH.balanceOf(alice), shares, "IV shares credited to caller");
+        IEVault inner = IEVault(IV_EULER_WSTETH.asset());
+        uint256 wstEthDeposited = inner.convertToAssets(IV_EULER_WSTETH.convertToAssets(shares));
+        assertApproxEqRel(
+            wstEthDeposited, expectedWstEth, 1e12, "airdropped WETH staked and deposited at the protocol rate"
+        );
+        _assertHandlerEmpty();
+        _assertNoResidue(WETH);
+        _assertNoResidue(WSTETH);
+    }
 
     function test_wstEthDirect_noSwap() public {
         // Acquire wstETH the honest way (stake), then zap it with no swap
@@ -196,6 +353,60 @@ contract AssetZapTest is Test {
         assertEq(IV_EULER_WSTETH.balanceOf(alice), shares);
 
         _assertNoResidue(WSTETH);
+    }
+
+    function test_ethToWeth_viaHandler() public {
+        // ETH wraps to WETH via the handler (value-carrying batch item), then zaps into the WETH IV.
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+
+        IEVault inner = IEVault(IV_EULER_WETH.asset());
+        // ETH->WETH is exactly 1:1; measure the WETH that reaches the inner vault (avoids eulerWETH share rounding).
+        uint256 innerWethBefore = IERC20(WETH).balanceOf(address(inner));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(wstethHandler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, 0, address(IV_EULER_WETH), IERC4626(IV_EULER_WETH.asset()).convertToShares(amountIn) * 99 / 100))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(IV_EULER_WETH),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        IEVC(EVC).batch{value: amountIn}(items);
+
+        uint256 shares = IV_EULER_WETH.balanceOf(alice);
+        assertGt(shares, 0);
+        assertEq(IV_EULER_WETH.balanceOf(alice), shares);
+        assertEq(
+            IERC20(WETH).balanceOf(address(inner)) - innerWethBefore,
+            amountIn,
+            "full ETH wrapped 1:1 to WETH and deposited"
+        );
+        // eulerWETH shares are a separate (non-1:1) representation; verify they still track the deposit.
+        uint256 wethDeposited = inner.convertToAssets(IV_EULER_WETH.convertToAssets(shares));
+        assertApproxEqRel(wethDeposited, amountIn, 1e12, "eulerWETH shares track the deposited WETH");
+        _assertNoResidue(WETH);
+    }
+
+    function test_revert_wrapETH_invalidWrapper() public {
+        // wrapETH only accepts the handler's WETH/WSTETH as the wrapper; any other token reverts before staking.
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert(IErrors.T_InvalidWrapper.selector);
+        wstethHandler.wrapETH{value: 1 ether}(address(assetZap), USDE);
     }
 
     function test_usdeToPt_viaSwapper_aaveIV() public {

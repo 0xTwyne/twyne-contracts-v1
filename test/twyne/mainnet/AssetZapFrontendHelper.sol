@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IVault} from "euler-vault-kit/EVault/IEVault.sol";
+import {WstethHandler} from "src/operators/handlers/WstethHandler.sol";
 
 interface ISwapper {
     struct SwapParams {
@@ -147,6 +148,14 @@ library AssetZapFrontendHelper {
         swapData[0] = abi.encodeCall(ISwapper.swap, (sp));
     }
 
+    /// @dev SWAPPER.multicall payload routing WETH -> wstETH via the handler (Generic target). The handler
+    ///      pulls WETH from the Swapper, unwraps to ETH, stakes at the wstETH protocol rate, and forwards
+    ///      wstETH to `zap` for the deposit.
+    function wstethSwapData(address zap, address handler, uint256 amountIn) internal pure returns (bytes[] memory) {
+        bytes memory payload = abi.encodeCall(WstethHandler.wrapWETH, (amountIn, zap));
+        return genericSwap(WETH, WSTETH, handler, payload);
+    }
+
     /// @dev Replaces a SWAPPER.deposit with the wrapper's own skim: the Swapper sweeps its full `input`
     ///      balance to `wrapper`, then a Generic-handler step runs `wrapper.skim(receiver)` so the wrapper
     ///      absorbs the underlying and mints shares straight to `receiver` (AssetZap). No deposit path or
@@ -168,6 +177,21 @@ library AssetZapFrontendHelper {
         swapData = new bytes[](2);
         swapData[0] = abi.encodeCall(ISwapper.sweep, (input, 0, wrapper));
         swapData[1] = genericSwap(input, wrapper, wrapper, skimCalldata)[0];
+    }
+
+    /// @dev Two-step Generic-handler route: WstethHandler delivers wstETH directly to `wrapper`, then a
+    ///      Generic handler calls `wrapper.skim` with caller-supplied calldata.
+    function wstethWrapSwapData(uint256 amountIn, address wrapper, address handler, bytes memory skimCalldata)
+        internal
+        pure
+        returns (bytes[] memory)
+    {
+        bytes[] memory step1 = genericSwap(WETH, WSTETH, handler, abi.encodeCall(WstethHandler.wrapWETH, (amountIn, wrapper)));
+        bytes[] memory step2 = genericSwap(WSTETH, wrapper, wrapper, skimCalldata);
+        bytes[] memory swapData = new bytes[](2);
+        swapData[0] = step1[0];
+        swapData[1] = step2[0];
+        return swapData;
     }
 
     /// @dev AMM-only fallback guess; production calldata carries a tighter off-chain guess from the Pendle SDK.

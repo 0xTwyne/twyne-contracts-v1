@@ -341,6 +341,15 @@ contract AaveTestNormalActions is AaveTestBase {
         aave_depositUnderlyingToIntermediateVault(collateralAssets);
     }
 
+    // Test both direct and batch calls to depositETHToIntermediateVault
+    function test_aave_depositETHToIntermediateVault() public noGasMetering {
+        aave_depositETHToIntermediateVault(address(aWETHWrapper));
+    }
+
+    function testFuzz_aave_depositETHToIntermediateVault(address collateralAssets) public noGasMetering {
+        aave_depositETHToIntermediateVault(collateralAssets);
+    }
+
     // Test skim function
     function test_aave_skim() public noGasMetering {
         aave_skim(address(aWETHWrapper));

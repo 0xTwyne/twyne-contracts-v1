@@ -91,7 +91,6 @@ abstract contract TwyneVaultTestBase is AssertionsCustomTypes, TwyneStorage, Tes
 
         address evaultImpl = address(new EVault(integrations, modules));
 
-
         vm.startPrank(admin);
         protocolConfig.setInterestFeeRange(0, 0); // set fee range to zero
         protocolConfig.setProtocolFeeShare(0); // set protocol fee to zero
@@ -110,7 +109,6 @@ abstract contract TwyneVaultTestBase is AssertionsCustomTypes, TwyneStorage, Tes
         oracleRouter = new EulerRouter(address(evc), address(twyneVaultManager));
         vm.label(address(oracleRouter), "oracleRouter");
 
-        twyneVaultManager.setOracleRouter(address(oracleRouter));
         collateralVaultFactory.setVaultManager(address(twyneVaultManager));
 
         vm.stopPrank();

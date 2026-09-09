@@ -52,7 +52,7 @@ contract MainnetBase is TwyneVaultTestBase {
         eulerUSDS = 0x07F9A54Dc5135B9878d6745E267625BF0E206840;
         eulerOnChain = EulerRouter(0x83B3b76873D36A28440cF53371dF404c42497136);
         fixtureCollateralAssets = [eulerWETH, eulerWSTETH, eulerCBBTC];
-        fixtureTargetAssets = [eulerUSDC, eulerUSDS];
+        fixtureTargetAssets = [eulerUSDC];
         eulerSwapVerifier = 0xae26485ACDDeFd486Fe9ad7C2b34169d360737c7;
         eulerSwapper = 0x2Bba09866b6F1025258542478C39720A09B728bF;
         morpho = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;

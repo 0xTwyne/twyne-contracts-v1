@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import "forge-std/Script.sol";
 import "forge-std/Vm.sol";
-import {EulerWrapper, IEVault} from "src/Periphery/EulerWrapper.sol";
+import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 
 /// @title TwynePeriphery
 /// @notice To contact the team regarding security matters, visit https://twyne.xyz/security
@@ -33,10 +33,5 @@ contract TwynePeriphery is Script {
 
         address intermediateVault = address(vm.parseJsonAddress(json, ".intermediateVault"));
 
-        vm.startBroadcast(deployer);
-        EulerWrapper eulerWrapper = new EulerWrapper(IEVault(intermediateVault).EVC(), IEVault(eulerWETH).asset());
-        vm.stopBroadcast();
-
-        console2.log("eulerWrapper", address(eulerWrapper));
     }
 }

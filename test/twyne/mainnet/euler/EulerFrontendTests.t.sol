@@ -9,13 +9,19 @@ import {MockChainlinkOracle} from "test/mocks/MockChainlinkOracle.sol";
 import {ChainlinkOracle} from "euler-price-oracle/src/adapter/chainlink/ChainlinkOracle.sol";
 import {EulerCollateralVault} from "src/twyne/EulerCollateralVault.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
-import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {MockSwapper} from "test/mocks/MockSwapper.sol";
 import {Errors as EVCErrors} from "ethereum-vault-connector/Errors.sol";
+import {AssetZapFrontendHelper, IWstETH, IPendleMarket, IPendleRouter, PendleTokenInput, PendleSwapData} from "../AssetZapFrontendHelper.sol";
+import {WstethHandler} from "src/operators/handlers/WstethHandler.sol";
+import {AssetZap} from "src/Periphery/AssetZap.sol";
+import {IVault} from "euler-vault-kit/EVault/IEVault.sol";
+import {IAaveV3ATokenWrapper} from "src/interfaces/IAaveV3ATokenWrapper.sol";
+import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 
 contract EulerFrontendTests is EulerTestBase {
     function setUp() public override {
@@ -33,7 +39,7 @@ contract EulerFrontendTests is EulerTestBase {
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV, address(0)))
+            data: abi.encodeCall(collateralVaultFactory.createEulerCollateralVault, (intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV))
         });
         vm.startPrank(alice);
         (IEVC.BatchItemResult[] memory batchItemsResult,,) = evc.batchSimulation(items);
@@ -60,13 +66,18 @@ contract EulerFrontendTests is EulerTestBase {
         IERC20(WETH).approve(permit2, type(uint).max);
         Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
 
+        // Wrap WETH into the eToken (eulerWETH) and approve the collateral vault before depositing
+        IERC20(WETH).approve(eulerWETH, COLLATERAL_AMOUNT);
+        uint collateralShares = IEVault(eulerWETH).deposit(COLLATERAL_AMOUNT, alice);
+        IERC20(eulerWETH).approve(address(user_collateral_vault), collateralShares);
+
         items = new IEVC.BatchItem[](4);
         // Create collateral vault
         items[0] = IEVC.BatchItem({
             targetContract: address(collateralVaultFactory),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(collateralVaultFactory.createCollateralVault, (VaultType.EULER_V2, intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV, address(0)))
+            data: abi.encodeCall(collateralVaultFactory.createEulerCollateralVault, (intermediateVaultFor[eulerWETH], eulerUSDC, twyneLiqLTV))
         });
         // Perform Permit2 on the collateral vault
         items[1] = IEVC.BatchItem({
@@ -85,7 +96,7 @@ contract EulerFrontendTests is EulerTestBase {
             targetContract: address(user_collateral_vault),
             onBehalfOfAccount: alice,
             value: 0,
-            data: abi.encodeCall(EulerCollateralVault(user_collateral_vault).depositUnderlying, (COLLATERAL_AMOUNT))
+            data: abi.encodeCall(EulerCollateralVault(user_collateral_vault).deposit, (collateralShares))
         });
         // Borrow assets from target vault
         items[3] = IEVC.BatchItem({
@@ -115,7 +126,7 @@ contract EulerFrontendTests is EulerTestBase {
     //     console2.log("maxBorrowValueExternalLimit", maxBorrowValueExternalLimit);
 
     //     // Second liquidation limit is the Twyne limit
-    //     uint userCollateralValue = EulerRouter(twyneVaultManager.oracleRouter()).getQuote(
+    //     uint userCollateralValue = oracleRouter.getQuote(
     //         user_collateral_vault.totalAssetsDepositedOrReserved() - user_collateral_vault.maxRelease(), user_collateral_vault.asset(), IEVault(eeWETH_intermediate_vault).unitOfAccount());
     //     uint maxBorrowValueTwyneLimit = user_collateral_vault.twyneLiqLTV() * userCollateralValue / MAXFACTOR;
     //     console2.log("maxBorrowValueTwyneLimit", maxBorrowValueTwyneLimit);
@@ -273,68 +284,6 @@ contract EulerFrontendTests is EulerTestBase {
         assertEq(IERC20(eulerWETH).balanceOf(address(alice_collateral_vault)), 0, "Collateral vault is not empty!");
     }
 
-    function test_e_frontend_depositUnderlyingViaTwyneEVC() external noGasMetering {
-        // Bob convert WETH from eulerWETH
-        vm.startPrank(bob);
-        // First, approve permit2 to allow permit2 usage in batch
-        IERC20(WETH).approve(permit2, type(uint).max);
-        Permit2ECDSASigner permit2Signer = new Permit2ECDSASigner(address(permit2));
-
-        IAllowanceTransfer.PermitSingle memory permitSingle = IAllowanceTransfer.PermitSingle({
-            details: IAllowanceTransfer.PermitDetails({
-                token: WETH,
-                amount: uint160(CREDIT_LP_AMOUNT),
-                expiration: type(uint48).max,
-                nonce: 0
-            }),
-            spender: address(evc),
-            sigDeadline: type(uint256).max
-        });
-
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](4);
-
-        items[0] = IEVC.BatchItem({
-            targetContract: permit2,
-            onBehalfOfAccount: bob,
-            value: 0,
-            data: abi.encodeWithSignature(
-                "permit(address,((address,uint160,uint48,uint48),address,uint256),bytes)",
-                bob,
-                permitSingle,
-                permit2Signer.signPermitSingle(bobKey, permitSingle)
-            )
-        });
-        items[1] = IEVC.BatchItem({
-            targetContract: permit2,
-            onBehalfOfAccount: bob,
-            value: 0,
-            data: abi.encodeWithSignature(
-                "transferFrom(address,address,uint160,address)",
-                bob,
-                address(evc),
-                CREDIT_LP_AMOUNT,
-                WETH
-            )
-        });
-        items[2] = IEVC.BatchItem({
-            targetContract: WETH,
-            onBehalfOfAccount: bob,
-            value: 0,
-            data: abi.encodeCall(IERC20(WETH).approve, (eulerWETH, type(uint).max))
-        });
-        items[3] = IEVC.BatchItem({
-            targetContract: eulerWETH,
-            onBehalfOfAccount: bob,
-            value: 0,
-            data: abi.encodeCall(IEVault(eulerWETH).deposit, (CREDIT_LP_AMOUNT, bob))
-        });
-        console2.log(IEVault(eulerWETH).balanceOf(bob));
-        evc.batch(items);
-        vm.stopPrank();
-
-        console2.log(IEVault(eulerWETH).balanceOf(bob));
-    }
-
     function test_e_frontend_depositETHViaTwyneEVC() external noGasMetering {
         // Bob converts ETH to eulerWETH
         vm.startPrank(bob);
@@ -376,12 +325,10 @@ contract EulerFrontendTests is EulerTestBase {
         // Step 1: Create collateral vault for user
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV,
-                _targetAsset: address(0)
+                _liqLTV: twyneLiqLTV
             })
         );
 
@@ -424,12 +371,10 @@ contract EulerFrontendTests is EulerTestBase {
         // Step 1: Create collateral vault for user
         vm.startPrank(alice);
         EulerCollateralVault alice_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: intermediateVaultFor[eulerWETH],
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV,
-                _targetAsset: address(0)
+                _liqLTV: twyneLiqLTV
             })
         );
 
@@ -538,5 +483,389 @@ contract EulerFrontendTests is EulerTestBase {
 
 
         vm.stopPrank();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // AssetZap reference flows (frontend: zap any asset into an intermediate vault in one tx).
+    // Each flow deposits credit (LP side) — borrow flows are shown in the tests above.
+    // ---------------------------------------------------------------------------------------------
+
+    /// @notice ETH -> WETH asset-zap into the eulerWETH intermediate vault.
+    /// @dev Item 0 wraps ETH 1:1 to WETH via the handler and airdrops it on AssetZap; item 1 zaps in
+    ///      airdrop mode (amountIn == 0) with no swap since WETH is the IV underlying.
+    function test_e_frontend_assetZap_ETH_to_WETH() public noGasMetering {
+        IEVault intermediateVault = IEVault(intermediateVaultFor[eulerWETH]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        IEVault inner = IEVault(intermediateVault.asset()); // eulerWETH
+        uint256 innerWethBefore = IERC20(WETH).balanceOf(address(inner));
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            // WETH is airdropped; the Swapper sweeps it to the IV's wrapper and skims it into eToken shares before the deposit.
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, 0, address(intermediateVault), 1))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        uint256 shares = intermediateVault.balanceOf(alice);
+        assertGt(shares, 0, "alice credited IV shares");
+        assertEq(IERC20(WETH).balanceOf(address(inner)) - innerWethBefore, amountIn, "full ETH wrapped 1:1 to WETH and deposited");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
+    /// @notice ETH -> wstETH asset-zap into the eulerWSTETH intermediate vault.
+    /// @dev Item 0 wraps ETH to WETH (handler); item 1 zaps WETH with a Generic-handler swap routing
+    ///      WETH -> wstETH via the EVK Swapper before the deposit.
+    function test_e_frontend_assetZap_ETH_to_WSTETH() public noGasMetering {
+        IEVault intermediateVault = IEVault(intermediateVaultFor[eulerWSTETH]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+        address wrapper = intermediateVault.asset();
+        // Step 1: WstethHandler delivers wstETH directly to the wrapper.
+        // Step 2: Generic handler calls wrapper.skim to absorb wstETH into wrapper shares at AssetZap.
+        bytes[] memory step1 = AssetZapFrontendHelper.wstethSwapData(wrapper, address(handler), amountIn);
+        bytes[] memory step2 = AssetZapFrontendHelper.genericSwap(
+            WSTETH, wrapper, wrapper, abi.encodeCall(IVault.skim, (type(uint256).max, address(assetZap)))
+        );
+        bytes[] memory swapData = new bytes[](2);
+        swapData[0] = step1[0];
+        swapData[1] = step2[0];
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(
+                AssetZap.zap,
+                (WETH, 0, swapData, address(intermediateVault), 1)
+            )
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(intermediateVault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(IVault.skim, (type(uint256).max, alice))
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        uint256 shares = intermediateVault.balanceOf(alice);
+        assertGt(shares, 0, "alice credited IV shares");
+        // wstETH that reached the IV's asset (eulerWSTETH) tracks the staked amount.
+        IEVault inner = IEVault(intermediateVault.asset());
+        uint256 wstEthDeposited = inner.convertToAssets(intermediateVault.convertToAssets(shares));
+        assertApproxEqRel(wstEthDeposited, expectedWstEth, 1e12, "staked wstETH deposited at the protocol rate");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(IERC20(WSTETH).balanceOf(address(assetZap)), 0, "no wstETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
+    /// @notice USDe -> PT-srUSDe asset-zap into the live Aave PT-srUSDe intermediate vault.
+    /// @dev PT-srUSDe credit is Aave-side on mainnet (there is no Euler PT-srUSDe vault), and the asset-zap is
+    ///      protocol-agnostic, so this reference flow is identical for an Euler frontend. The zap swaps USDe -> PT
+    ///      via the real Pendle router (EVK Swapper Generic handler), then deposits PT into the live IV's asset
+    ///      (the wrapper's underlying is raw PT-srUSDe). The live vault only accepts raw-PT deposits once the Aave
+    ///      PT-srUSDe reserve is active, so the fork is rolled to the block pinned by the asset-zap test.
+    ///      rollFork wipes the test's locally-deployed stack, so a fresh AssetZap is deployed on the live EVC and
+    ///      a clean EOA is used (makeAddr() can collide with live contracts).
+    function test_e_frontend_assetZap_USDe_to_PT() public noGasMetering {
+        vm.rollFork(AssetZapFrontendHelper.PT_FORK_BLOCK);
+        IEVault ptIV = IEVault(AssetZapFrontendHelper.IV_AAVE_PT_SRUSDE);
+        AssetZap zap = new AssetZap(AssetZapFrontendHelper.EVC_MAINNET, AssetZapFrontendHelper.SWAPPER);
+
+        address user = makeAddr("ptZapUser");
+        vm.etch(user, "");
+        vm.deal(user, 0);
+
+        uint256 amountIn = 10_000e18;
+        // deal() is unreliable for USDe's storage layout; transfer from the sUSDe contract's balance.
+        vm.prank(AssetZapFrontendHelper.SUSDE);
+        IERC20(AssetZapFrontendHelper.USDE).transfer(user, amountIn);
+
+        (address sy,,) = IPendleMarket(AssetZapFrontendHelper.PENDLE_MARKET_SRUSDE).readTokens();
+        address tokenMintSy = AssetZapFrontendHelper.pickTokenMintSy(sy);
+
+        address wrapper = ptIV.asset();
+
+        bytes memory pendlePayload = abi.encodeCall(
+            IPendleRouter.swapExactTokenForPt,
+            (
+                wrapper, // PT lands directly at the wrapper; the next step skims it
+                AssetZapFrontendHelper.PENDLE_MARKET_SRUSDE,
+                0,
+                AssetZapFrontendHelper.defaultGuess(),
+                PendleTokenInput({
+                    tokenIn: AssetZapFrontendHelper.USDE,
+                    netTokenIn: amountIn,
+                    tokenMintSy: tokenMintSy,
+                    pendleSwap: address(0),
+                    swapData: PendleSwapData({swapType: 0, extRouter: address(0), extCalldata: "", needScale: false})
+                }),
+                AssetZapFrontendHelper.emptyLimit()
+            )
+        );
+        bytes[] memory step1 = AssetZapFrontendHelper.genericSwap(
+            AssetZapFrontendHelper.USDE, AssetZapFrontendHelper.PT_SRUSDE, AssetZapFrontendHelper.PENDLE_ROUTER, pendlePayload
+        );
+        bytes[] memory step2 = AssetZapFrontendHelper.genericSwap(
+            AssetZapFrontendHelper.PT_SRUSDE, wrapper, wrapper,
+            abi.encodeCall(IAaveV3ATokenWrapper.skim, (address(zap)))
+        );
+        bytes[] memory swapData = new bytes[](2);
+        swapData[0] = step1[0];
+        swapData[1] = step2[0];
+
+        vm.startPrank(user);
+        IERC20(AssetZapFrontendHelper.USDE).approve(address(zap), amountIn);
+        zap.zap(AssetZapFrontendHelper.USDE, amountIn, swapData, address(ptIV), 1);
+        uint256 shares = ptIV.skim(type(uint).max, user);
+        vm.stopPrank();
+
+        assertGt(shares, 0, "user credited IV shares");
+        assertEq(ptIV.balanceOf(user), shares, "shares credited to user");
+        assertGt(IEVault(ptIV.asset()).convertToAssets(ptIV.convertToAssets(shares)), amountIn * 97 / 100, "PT out sane vs USDe in");
+        assertEq(IERC20(AssetZapFrontendHelper.USDE).balanceOf(address(zap)), 0, "no USDe residue");
+        assertEq(IERC20(AssetZapFrontendHelper.PT_SRUSDE).balanceOf(address(zap)), 0, "no PT residue");
+    }
+
+    // ------------------------------------------------------------------ //
+    //                AssetZap into collateral vaults (CV)                 //
+    //   Same swap routes as the IV tests above; only the destination and  //
+    //   the final absorb step change (CV.skim() vs IV.skim(user)).        //
+    // ------------------------------------------------------------------ //
+
+    /// @notice ETH -> WETH asset-zap into an Euler WETH collateral vault.
+    /// @dev WETH is airdropped (item 0), deposited into eWETH shares (item 1 zap), and the CV absorbs
+    ///      them via `CV.skim()` (item 2) instead of minting IV shares.
+    function test_e_frontend_assetZap_ETH_to_WETH_CV() public noGasMetering {
+        address collateralAsset = eulerWETH;
+        e_createCollateralVault(collateralAsset, uint16(twyneVaultManager.maxTwyneLTVs(intermediateVaultFor[collateralAsset], USDC)));
+        EulerCollateralVault cv = alice_collateral_vault;
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+        address wrapper = intermediateVault.asset();
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            // WETH is airdropped; the Swapper sweeps it to the CV's wrapper and skims it into eToken shares before the deposit.
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, 0, address(cv), 1))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(cv),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(cv.skim, ())
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        assertGt(cv.totalAssetsDepositedOrReserved(), 0, "collateral credited");
+        assertGt(IERC20(wrapper).balanceOf(address(cv)), 0, "CV holds eToken shares");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
+    /// @notice ETH -> wstETH asset-zap into an Euler wstETH collateral vault.
+    /// @dev Same WETH -> wstETH (handler) -> eToken-shares route as the IV test; the CV absorbs via skim().
+    function test_e_frontend_assetZap_ETH_to_WSTETH_CV() public noGasMetering {
+        address collateralAsset = eulerWSTETH;
+        e_createCollateralVault(collateralAsset, uint16(twyneVaultManager.maxTwyneLTVs(intermediateVaultFor[collateralAsset], USDC)));
+        EulerCollateralVault cv = alice_collateral_vault;
+        IEVault intermediateVault = IEVault(intermediateVaultFor[collateralAsset]);
+        WstethHandler handler = new WstethHandler(WETH, WSTETH);
+
+        uint256 amountIn = 1 ether;
+        vm.deal(alice, amountIn);
+        uint256 expectedWstEth = IWstETH(WSTETH).getWstETHByStETH(amountIn);
+        address wrapper = intermediateVault.asset();
+        // Step 1: WstethHandler delivers wstETH directly to the wrapper.
+        // Step 2: Generic handler calls wrapper.skim to absorb wstETH into eToken shares at AssetZap.
+        bytes[] memory step1 = AssetZapFrontendHelper.wstethSwapData(wrapper, address(handler), amountIn);
+        bytes[] memory step2 = AssetZapFrontendHelper.genericSwap(
+            WSTETH, wrapper, wrapper, abi.encodeCall(IVault.skim, (type(uint256).max, address(assetZap)))
+        );
+        bytes[] memory swapData = new bytes[](2);
+        swapData[0] = step1[0];
+        swapData[1] = step2[0];
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](3);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(handler),
+            onBehalfOfAccount: alice,
+            value: amountIn,
+            data: abi.encodeCall(WstethHandler.wrapETH, (address(assetZap), WETH))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zap, (WETH, 0, swapData, address(cv), 1))
+        });
+        items[2] = IEVC.BatchItem({
+            targetContract: address(cv),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(cv.skim, ())
+        });
+
+        vm.prank(alice);
+        evc.batch{value: amountIn}(items);
+
+        assertGt(cv.totalAssetsDepositedOrReserved(), 0, "collateral credited");
+        // wstETH that reached the IV's asset (eulerWSTETH) tracks the staked amount.
+        // The CV auto-reserves credit on deposit (boosted yield), so only the user-owned collateral
+        // (totalAssetsDepositedOrReserved - maxRelease) corresponds to the staked wstETH. eulerWSTETH is the
+        // eToken whose asset is wstETH, so a single convertToAssets yields the wstETH amount.
+        uint256 wstEthDeposited = IEVault(wrapper).convertToAssets(cv.totalAssetsDepositedOrReserved() - cv.maxRelease());
+        assertApproxEqRel(wstEthDeposited, expectedWstEth, 1e12, "staked wstETH deposited at the protocol rate");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no WETH residue");
+        assertEq(IERC20(WSTETH).balanceOf(address(assetZap)), 0, "no wstETH residue");
+        assertEq(address(assetZap).balance, 0, "no ETH residue");
+    }
+
+    /// @notice USDe -> PT-srUSDe asset-zap into the live PT-srUSDe collateral vault.
+    /// @dev PT-srUSDe credit is Aave-side on mainnet (there is no Euler PT-srUSDe vault), and the asset-zap
+    ///      is protocol-agnostic, so this reference CV flow is identical for an Euler frontend: the same
+    ///      USDe -> PT -> wrapper swap airdrops wrapper shares at the CV, then `CV.skim()` (EVC-routed on the
+    ///      live EVC, on behalf of the live borrower) absorbs them. rollFork wipes the local stack, so the
+    ///      live EVC / live CV / fresh AssetZap are used.
+    function test_e_frontend_assetZap_USDe_to_PT_CV() public noGasMetering {
+        vm.rollFork(AssetZapFrontendHelper.PT_FORK_BLOCK);
+        CollateralVaultBase cv = CollateralVaultBase(payable(AssetZapFrontendHelper.CV_AAVE_PT_SRUSDE));
+        address borrower = cv.borrower();
+        AssetZap zap = new AssetZap(AssetZapFrontendHelper.EVC_MAINNET, AssetZapFrontendHelper.SWAPPER);
+
+        vm.etch(borrower, "");
+
+        uint256 amountIn = 10_000e18;
+        // deal() is unreliable for USDe's storage layout; transfer from the sUSDe contract's balance.
+        vm.prank(AssetZapFrontendHelper.SUSDE);
+        IERC20(AssetZapFrontendHelper.USDE).transfer(borrower, amountIn);
+
+        (address sy,,) = IPendleMarket(AssetZapFrontendHelper.PENDLE_MARKET_SRUSDE).readTokens();
+        address tokenMintSy = AssetZapFrontendHelper.pickTokenMintSy(sy);
+        address wrapper = cv.asset();
+
+        bytes[] memory swapData;
+        {
+            bytes memory pendlePayload = abi.encodeCall(
+                IPendleRouter.swapExactTokenForPt, (
+                wrapper, // PT lands directly at the wrapper; next step skims it
+                AssetZapFrontendHelper.PENDLE_MARKET_SRUSDE,
+                0,
+                AssetZapFrontendHelper.defaultGuess(),
+                PendleTokenInput({
+                    tokenIn: AssetZapFrontendHelper.USDE,
+                    netTokenIn: amountIn,
+                    tokenMintSy: tokenMintSy,
+                    pendleSwap: address(0),
+                    swapData: PendleSwapData({swapType: 0, extRouter: address(0), extCalldata: "", needScale: false})
+                }),
+                AssetZapFrontendHelper.emptyLimit()
+            ));
+            bytes[] memory step1 = AssetZapFrontendHelper.genericSwap(
+                AssetZapFrontendHelper.USDE, AssetZapFrontendHelper.PT_SRUSDE, AssetZapFrontendHelper.PENDLE_ROUTER, pendlePayload
+            );
+            bytes[] memory step2 = AssetZapFrontendHelper.genericSwap(
+                AssetZapFrontendHelper.PT_SRUSDE, wrapper, wrapper,
+                abi.encodeCall(IAaveV3ATokenWrapper.skim, (address(zap)))
+            );
+            swapData = new bytes[](2);
+            swapData[0] = step1[0];
+            swapData[1] = step2[0];
+        }
+
+        uint256 collBefore = cv.totalAssetsDepositedOrReserved();
+        vm.startPrank(borrower);
+        IERC20(AssetZapFrontendHelper.USDE).approve(address(zap), amountIn);
+        zap.zap(AssetZapFrontendHelper.USDE, amountIn, swapData, address(cv), 1);
+        // CV.skim() is onlyBorrower-gated and must be routed through the (live) EVC.
+        IEVC(AssetZapFrontendHelper.EVC_MAINNET).call(
+            address(cv), borrower, 0, abi.encodeCall(cv.skim, ())
+        );
+        vm.stopPrank();
+
+        assertGt(cv.totalAssetsDepositedOrReserved(), collBefore, "collateral increased by PT airdrop");
+        assertEq(IERC20(AssetZapFrontendHelper.USDE).balanceOf(address(zap)), 0, "no USDe residue");
+        assertEq(IERC20(AssetZapFrontendHelper.PT_SRUSDE).balanceOf(address(zap)), 0, "no PT residue");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Borrower-side underlying deposit via AssetZap (replaces the removed CV.depositUnderlying).
+    // AssetZap.zapUnderlying pulls WETH, wraps it into eulerWETH (eToken) shares, and airdrops them on
+    // the CV; the batch then calls cv.skim() to absorb the airdropped shares as collateral.
+    // ---------------------------------------------------------------------------------------------
+    function test_e_frontend_depositUnderlyingViaAssetZap() public noGasMetering {
+        e_createCollateralVault(eulerWETH, 0.9e4);
+
+        uint256 amountIn = COLLATERAL_AMOUNT;
+        vm.startPrank(alice);
+        uint256 wethBefore = IERC20(WETH).balanceOf(alice);
+        IERC20(WETH).approve(address(assetZap), amountIn);
+
+        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        items[0] = IEVC.BatchItem({
+            targetContract: address(assetZap),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(AssetZap.zapUnderlying, (WETH, amountIn, address(alice_collateral_vault), 0))
+        });
+        items[1] = IEVC.BatchItem({
+            targetContract: address(alice_collateral_vault),
+            onBehalfOfAccount: alice,
+            value: 0,
+            data: abi.encodeCall(alice_collateral_vault.skim, ())
+        });
+        evc.batch(items);
+        vm.stopPrank();
+
+        assertEq(wethBefore - IERC20(WETH).balanceOf(alice), amountIn, "full underlying consumed");
+        assertGt(alice_collateral_vault.totalAssetsDepositedOrReserved(), 0, "collateral credited to CV");
+        assertEq(IERC20(WETH).balanceOf(address(assetZap)), 0, "no underlying residue on zap");
+        assertEq(IEVault(eulerWETH).balanceOf(address(assetZap)), 0, "no wrapper residue on zap");
     }
 }

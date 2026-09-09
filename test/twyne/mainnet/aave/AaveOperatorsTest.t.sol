@@ -11,8 +11,6 @@ import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.
 import {MockSwapper} from "test/mocks/MockSwapper.sol";
 import {IErrors as TwyneErrors} from "src/interfaces/IErrors.sol";
 import {Errors as EVCErrors} from "ethereum-vault-connector/Errors.sol";
-import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
-import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {SafeERC20Lib} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {Permit2ECDSASigner} from "euler-vault-kit/../test/mocks/Permit2ECDSASigner.sol";
@@ -53,13 +51,45 @@ contract AaveOperatorsTest is AaveTestBase {
 
         // Deal tokens and approvals
         deal(WETH, alice, userUnderlyingCollateralAmount * 2);
-        IERC20(WETH).approve(address(alice_aave_vault), type(uint256).max);
+        IERC20(WETH).approve(address(aWETHWrapper), type(uint256).max);
         IERC20(WETH).approve(address(aaveV3LeverageOperator), type(uint256).max);
 
         // Make initial deposit to the vault
-        alice_aave_vault.depositUnderlying(userUnderlyingCollateralAmount);
+        uint shares = aWETHWrapper.deposit(userUnderlyingCollateralAmount, alice);
+        aWETHWrapper.approve(address(alice_aave_vault), shares);
+        alice_aave_vault.deposit(shares);
         uint initialCollateral = alice_aave_vault.totalAssetsDepositedOrReserved() - alice_aave_vault.maxRelease();
         assertGt(initialCollateral, 0, "Initial deposit should create collateral");
+
+        // minAmountOut applies to the swap output only: user-supplied collateral must not
+        // count toward it. Swap pays 0.9 ether + 10 wei.
+        uint swapOutputWETH = 0.9 ether;
+        deal(WETH, eulerSwapper, swapOutputWETH + 10);
+        bytes memory slippageSwapData = abi.encodeCall(
+            MockSwapper.swap,
+            (USDC, WETH, flashloanAmount, swapOutputWETH, address(aaveV3LeverageOperator))
+        );
+        bytes[] memory slippageMulticallData = new bytes[](1);
+        slippageMulticallData[0] = slippageSwapData;
+
+        // Swap output (0.9 ether + 10 wei) alone is below minAmountOut (1 ether)
+        vm.expectRevert(TwyneErrors.T_SlippageCheckFailed.selector);
+        aaveV3LeverageOperator.executeLeverage(
+            address(alice_aave_vault), 0, 0, flashloanAmount, 1 ether, deadline, slippageMulticallData
+        );
+
+        // With user collateral: 0.9 ether < minAmountOut (1.8 ether) < 0.9 ether + user's
+        // 1 ether, so passing would mean the user's WETH wrongly counted toward the check
+        vm.expectRevert(TwyneErrors.T_SlippageCheckFailed.selector);
+        aaveV3LeverageOperator.executeLeverage(
+            address(alice_aave_vault),
+            userUnderlyingCollateralAmount,
+            0,
+            flashloanAmount,
+            1.8 ether,
+            deadline,
+            slippageMulticallData
+        );
 
         // Deal WETH to swapper for successful swap simulation
         deal(WETH, eulerSwapper, minAmountOutWETH + 1 ether);
@@ -69,8 +99,14 @@ contract AaveOperatorsTest is AaveTestBase {
             MockSwapper.swap,
             (USDC, WETH, flashloanAmount, minAmountOutWETH, address(aaveV3LeverageOperator))
         );
-        bytes[] memory leverageMulticallData = new bytes[](1);
+        bytes[] memory leverageMulticallData = new bytes[](3);
         leverageMulticallData[0] = leverageSwapData;
+        // Route returning 100 USDC of the 1000 USDC flashloan: the drain step (a plain
+        // swap payout) leaves exactly the change-back in the swapper, sweep delivers it.
+        address leftoverSink = makeAddr("leftoverSink");
+        leverageMulticallData[1] =
+            abi.encodeCall(MockSwapper.swap, (WETH, USDC, 0.1 ether, flashloanAmount - 100e6 - 10, leftoverSink));
+        leverageMulticallData[2] = abi.encodeCall(MockSwapper.sweep, (USDC, 100e6, address(aaveV3LeverageOperator)));
 
         // Enable leverage operator and execute
         evc.setAccountOperator(alice, address(aaveV3LeverageOperator), true);
@@ -87,7 +123,9 @@ contract AaveOperatorsTest is AaveTestBase {
         // Verify leverage success
         uint leveragedCollateral = alice_aave_vault.totalAssetsDepositedOrReserved() - alice_aave_vault.maxRelease();
         assertGt(leveragedCollateral, initialCollateral, "Leverage should increase collateral");
-        assertApproxEqAbs(alice_aave_vault.maxRepay(), flashloanAmount, 1, "Vault should have debt from leverage");
+        assertApproxEqAbs(alice_aave_vault.maxRepay(), flashloanAmount - 100e6, 1, "Vault debt should equal consumed flashloan only");
+        assertEq(IERC20(USDC).balanceOf(address(aaveV3LeverageOperator)), 0, "LeverageOperator should have 0 USDC");
+        assertEq(IERC20(WETH).balanceOf(address(aaveV3LeverageOperator)), 0, "LeverageOperator should have 0 WETH");
 
         // === DELEVERAGE PHASE ===
 
@@ -128,8 +166,7 @@ contract AaveOperatorsTest is AaveTestBase {
     function test_AaveV3LeverageOperator_Unauthorized() public {
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
@@ -180,8 +217,7 @@ contract AaveOperatorsTest is AaveTestBase {
 
         // Step 2: Create collateral vault for teleport migration
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
@@ -236,8 +272,7 @@ contract AaveOperatorsTest is AaveTestBase {
 
         // Step 2: Create collateral vault for teleport migration
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
@@ -278,8 +313,7 @@ contract AaveOperatorsTest is AaveTestBase {
         // Setup: Alice creates a collateral vault
         vm.startPrank(alice);
         alice_aave_vault = AaveV3CollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.AAVE_V3,
+            collateralVaultFactory.createAaveV3CollateralVault({
                 _intermediateVault: intermediateVaultFor[address(aWETHWrapper)],
                 _targetVault: aavePool,
                 _liqLTV: 9100,
@@ -358,8 +392,8 @@ contract AaveOperatorsTest is AaveTestBase {
             onBehalfOfAccount: alice,
             value: 0,
             data: abi.encodeCall(
-                CollateralVaultFactory.createCollateralVault,
-                (VaultType.AAVE_V3, intermediateVaultFor[address(aWETHWrapper)], aavePool, 9100, USDC)
+                CollateralVaultFactory.createAaveV3CollateralVault,
+                (intermediateVaultFor[address(aWETHWrapper)], aavePool, 9100, USDC)
             )
         });
 

@@ -61,7 +61,7 @@ contract ParamChangeScript is BatchScript {
 
         bytes memory setMaxLiquidationLTVTxn = abi.encodeCall(
             VaultManager.setMaxLiquidationLTV,
-            (intermediateVaultAddr, 0.96e4, 0) // 96%
+            (intermediateVaultAddr, IEVault(intermediateVaultAddr).asset(), 0.96e4, 0) // 96%
         );
         addToBatch(address(twyneVaultManager), 0, setMaxLiquidationLTVTxn);
 

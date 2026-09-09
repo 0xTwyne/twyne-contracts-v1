@@ -5,6 +5,7 @@ import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {IEVC} from "ethereum-vault-connector/interfaces/IEthereumVaultConnector.sol";
 import {SafeERC20} from "openzeppelin-contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeERC20Lib, IERC20 as IERC20_Euler} from "euler-vault-kit/EVault/shared/lib/SafeERC20Lib.sol";
+import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {AaveV3CollateralVault} from "src/twyne/AaveV3CollateralVault.sol";
 import {CollateralVaultBase} from "src/twyne/CollateralVaultBase.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
@@ -52,19 +53,20 @@ contract AaveV3LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, I
 
     /// @notice Execute a leverage operation on an AaveV3 collateral vault
     /// @dev This function executes the following steps:
-    /// 1. Takes user's collateral
-    ///    a. Takes user's underlying collateral, deposits it to AaveV3 wrapper and transfers wrapper shares to collateral vault
-    ///    b. Takes user's aTokens, deposits them to AaveV3 wrapper and transfers wrapper shares to collateral vault
-    /// 2. Takes target asset flashloan from Morpho: target asset received in this contract
-    /// 3. Transfers received target asset to Swapper
-    /// 4. Swapper.multicall is called which swaps target asset to underlying collateral which is sent to AaveV3 wrapper
-    /// 5. SwapVerifier.verifyAmountMinAndDeposit is called which does minAmountOut check and calls deposit on AaveV3 wrapper.
-    ///    AaveV3Wrapper.deposit deposits underlying collateral and transfers wrapper shares to collateral vault
-    /// 6. EVC batch calls
+    /// 1. Takes target asset flashloan from Morpho: target asset received in this contract
+    /// 2. Transfers received target asset to Swapper
+    /// 3. Swapper.multicall is called which swaps target asset to underlying collateral
+    ///    which is received by this contract
+    /// 4. minAmountOut and deadline checks on the swapped underlying collateral
+    /// 5. Takes user's collateral contributions
+    ///    a. Takes user's underlying collateral
+    ///    b. Takes user's aTokens
+    /// 6. Supplies all underlying collateral to AaveV3 pool
+    /// 7. Deposits all aTokens to AaveV3 wrapper and transfers wrapper shares to collateral vault
+    /// 8. EVC batch calls
     ///    a. skim on collateral vault to deposit all the airdropped wrapper shares
-    ///    b. borrow on collateral vault to borrow target asset, this contract receives the borrowed amount
-    /// 7. Approves Morpho to transfer target asset from this contract
-    /// 8. Morpho transferFroms the flashloaned target asset from this contract
+    ///    b. borrow on collateral vault to borrow target asset, net of any target asset returned by the swap route
+    /// 9. Approves Morpho to transfer target asset from this contract; Morpho pulls the repayment
     /// @param collateralVault Address of the user's AaveV3 collateral vault
     /// @param underlyingCollateralAmount Amount of underlying collateral the user is providing
     /// @param aTokenCollateralAmount Amount of aTokens the user is providing
@@ -133,12 +135,17 @@ contract AaveV3LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, I
         // This contract receives the underlying collateral.
         ISwapper(SWAPPER).multicall(swapData);
 
+        // Target asset the route returned to this contract (e.g. an exact-output
+        // route sweeping its unconsumed input back). Only the consumed part needs to be
+        // borrowed; the returned part settles the flashloan repayment directly.
+        uint borrowAmount = amount - Math.min(amount, IERC20(targetAsset).balanceOf(address(this)));
+
         // Step 3: Check minimum amount received from swap
         {
             address underlyingCollateral = IAaveV3ATokenWrapper(wrapperAsset).asset();
             uint totalUnderlyingToSupply = IERC20(underlyingCollateral).balanceOf(address(this));
-            require(totalUnderlyingToSupply >= minAmountOut, "Slippage check failed");
-            require(block.timestamp <= deadline, "Deadline expired");
+            require(totalUnderlyingToSupply >= minAmountOut, T_SlippageCheckFailed());
+            require(block.timestamp <= deadline, T_DeadlineExpired());
 
             // Step 4: Collect user's collateral contributions
 
@@ -160,27 +167,31 @@ contract AaveV3LeverageOperator is ReentrancyGuardTransient, EVCUtil, IErrors, I
         IERC20(aToken).forceApprove(wrapperAsset, type(uint).max);
         IAaveV3ATokenWrapper(wrapperAsset).depositATokens(type(uint).max, collateralVault);
 
-        IEVC.BatchItem[] memory items = new IEVC.BatchItem[](2);
+        {
+            IEVC.BatchItem[] memory items = new IEVC.BatchItem[](Math.ternary(borrowAmount > 0, 2, 1));
 
-        // Deposit all airdropped wrapper shares to collateral vault
-        items[0] = IEVC.BatchItem({
-            targetContract: collateralVault,
-            onBehalfOfAccount: user,
-            value: 0,
-            data: abi.encodeCall(CollateralVaultBase.skim, ())
-        });
+            // Deposit all airdropped wrapper shares to collateral vault
+            items[0] = IEVC.BatchItem({
+                targetContract: collateralVault,
+                onBehalfOfAccount: user,
+                value: 0,
+                data: abi.encodeCall(CollateralVaultBase.skim, ())
+            });
 
-        // Borrow target asset from collateral vault (amount needed to repay flashloan)
-        items[1] = IEVC.BatchItem({
-            targetContract: collateralVault,
-            onBehalfOfAccount: user,
-            value: 0,
-            data: abi.encodeCall(CollateralVaultBase.borrow, (amount, address(this)))
-        });
+            // Borrow target asset from collateral vault, net of any target asset returned by the swap route
+            if (borrowAmount > 0) {
+                items[1] = IEVC.BatchItem({
+                    targetContract: collateralVault,
+                    onBehalfOfAccount: user,
+                    value: 0,
+                    data: abi.encodeCall(CollateralVaultBase.borrow, (borrowAmount, address(this)))
+                });
+            }
 
-        IEVC(evc).batch(items);
+            IEVC(evc).batch(items);
+        }
 
-        // Step 6: Approve Morpho to take repayment
+        // Step 7: Approve Morpho to take repayment
         IERC20(targetAsset).forceApprove(address(MORPHO), amount);
 
         // Morpho will automatically pull the repayment amount

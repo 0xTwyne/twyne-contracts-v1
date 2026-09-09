@@ -6,7 +6,6 @@ import {BatchScript} from "forge-safe/src/BatchScript.sol";
 import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
 import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
-import {VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {USD} from "euler-price-oracle/test/utils/EthereumAddresses.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
 import {CrossAdapter} from "euler-price-oracle/src/adapter/CrossAdapter.sol";
@@ -208,12 +207,10 @@ contract TwyneAddVaultPair is BatchScript {
 
         vm.startBroadcast(deployer);
         EulerCollateralVault deployer_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: intermediateVaultAddr,
                 _targetVault: _targetAsset,
-                _liqLTV: 0.97e4,
-                _targetAsset: IEVault(_targetAsset).asset()
+                _liqLTV: 0.97e4
             })
         );
         vm.stopBroadcast();
@@ -293,7 +290,7 @@ contract TwyneAddVaultPair is BatchScript {
             // Finish configuration of the new vault with twyneVaultManager
             bytes memory setOracleResolvedVault1Txn = abi.encodeCall(
                 VaultManager.setOracleResolvedVault,
-                (address(new_vault), true)
+                (address(oracleRouter), address(new_vault), true)
             );
             addToBatch(address(twyneVaultManager), 0, setOracleResolvedVault1Txn);
 
@@ -305,7 +302,7 @@ contract TwyneAddVaultPair is BatchScript {
 
             bytes memory setOracleResolvedVault2Txn = abi.encodeCall(
                 VaultManager.setOracleResolvedVault,
-                (_collateralAsset, true)
+                (address(oracleRouter), _collateralAsset, true)
             );
             addToBatch(address(twyneVaultManager), 0, setOracleResolvedVault2Txn);
 
@@ -314,19 +311,19 @@ contract TwyneAddVaultPair is BatchScript {
 
             bytes memory doCall1Txn = abi.encodeCall(
                 VaultManager.doCall,
-                (address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_collateralAsset).asset(), USD, address(eulerExternalOracle))))
+                (address(oracleRouter), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_collateralAsset).asset(), USD, address(eulerExternalOracle))))
             );
             addToBatch(address(twyneVaultManager), 0, doCall1Txn);
 
             bytes memory setMaxLiquidationLTVTxn = abi.encodeCall(
                 VaultManager.setMaxLiquidationLTV,
-                (address(new_vault), 0.98e4, 0)
+                (address(new_vault), IEVault(address(new_vault)).asset(), 0.98e4, 0)
             );
             addToBatch(address(twyneVaultManager), 0, setMaxLiquidationLTVTxn);
 
             bytes memory setExternalLiqBufferTxn = abi.encodeCall(
                 VaultManager.setExternalLiqBuffer,
-                (address(new_vault), 0.99e4, 0)
+                (address(new_vault), IEVault(address(new_vault)).asset(), 0.99e4, 0)
             );
             addToBatch(address(twyneVaultManager), 0, setExternalLiqBufferTxn);
         }

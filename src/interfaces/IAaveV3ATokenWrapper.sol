@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.28;
 
 library IERC4626StataToken {
     struct SignatureParams {
@@ -11,6 +11,8 @@ library IERC4626StataToken {
 
 interface IAaveV3ATokenWrapper {
     error AddressEmptyCode(address target);
+    error CallerNotAdmin();
+    error CallerNotOwnerOrPauseGuardian();
     error ControllerDisabled();
     error ECDSAInvalidSignature();
     error ECDSAInvalidSignatureLength(uint256 length);
@@ -47,6 +49,7 @@ interface IAaveV3ATokenWrapper {
     error StaticATokenInvalidZeroShares();
     error UUPSUnauthorizedCallContext();
     error UUPSUnsupportedProxiableUUID(bytes32 slot);
+    error ZeroAddress();
     error ZeroIncentivesControllerIsForbidden();
 
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -55,6 +58,9 @@ interface IAaveV3ATokenWrapper {
     event Initialized(uint64 version);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event Paused(address account);
+    event T_SetAdmin(address indexed admin);
+    event T_SetPauseGuardian(address indexed pauseGuardian);
+    event T_WrapperPause(bool pause);
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Unpaused(address account);
     event Upgraded(address indexed implementation);
@@ -70,8 +76,10 @@ interface IAaveV3ATokenWrapper {
     function RAY() external view returns (uint256);
     function UPGRADE_INTERFACE_VERSION() external view returns (string memory);
     function aToken() external view returns (address);
+    function admin() external view returns (address);
     function allowance(address owner, address spender) external view returns (uint256);
     function approve(address spender, uint256 value) external returns (bool);
+    function approvePool() external;
     function asset() external view returns (address);
     function balanceOf(address account) external view returns (uint256);
     function burnShares_CV(uint256 shares) external;
@@ -112,6 +120,8 @@ interface IAaveV3ATokenWrapper {
     function name() external view returns (string memory);
     function nonces(address owner) external view returns (uint256);
     function owner() external view returns (address);
+    function pause() external;
+    function pauseGuardian() external view returns (address);
     function paused() external view returns (bool);
     function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external;
@@ -124,7 +134,8 @@ interface IAaveV3ATokenWrapper {
     function redeem(uint256 shares, address receiver, address owner) external returns (uint256);
     function redeemATokens(uint256 shares, address receiver, address owner) external returns (uint256);
     function renounceOwnership() external;
-    function setPaused(bool paused) external;
+    function setAdmin(address _admin) external;
+    function setPauseGuardian(address _pauseGuardian) external;
     function skim(address receiver) external;
     function symbol() external view returns (string memory);
     function totalAssets() external view returns (uint256);
@@ -132,6 +143,7 @@ interface IAaveV3ATokenWrapper {
     function transfer(address to, uint256 value) external returns (bool);
     function transferFrom(address from, address to, uint256 value) external returns (bool);
     function transferOwnership(address newOwner) external;
+    function unpause() external;
     function upgradeToAndCall(address newImplementation, bytes memory data) external payable;
     function version() external pure returns (uint256);
     function withdraw(uint256 assets, address receiver, address owner) external returns (uint256);

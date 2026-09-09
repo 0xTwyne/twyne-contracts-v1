@@ -8,7 +8,7 @@ import {EthereumVaultConnector} from "ethereum-vault-connector/EthereumVaultConn
 import {MockBalanceTracker} from "euler-vault-kit/../test/mocks/MockBalanceTracker.sol";
 import {IRMTwyneCurveGamma32} from "src/twyne/IRMTwyneCurveGamma32.sol";
 import {EVault} from "euler-vault-kit/EVault/EVault.sol";
-import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {USD} from "euler-price-oracle/test/utils/EthereumAddresses.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -21,7 +21,6 @@ import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {Address} from "openzeppelin-contracts/utils/Address.sol";
 import {AaveV3LeverageOperator} from "src/operators/AaveV3LeverageOperator.sol";
-import {AaveV3Wrapper} from "src/Periphery/AaveV3Wrapper.sol";
 import {AaveV3TeleportOperator} from "src/operators/AaveV3TeleportOperator.sol";
 import {AaveV3DeleverageOperator} from "src/operators/AaveV3DeleverageOperator.sol";
 import {IAaveV3ATokenWrapper} from "src/interfaces/IAaveV3ATokenWrapper.sol";
@@ -206,15 +205,6 @@ contract TwyneDeployAaveV3Integration is BatchScript {
             address(eaWSTETH_intermediate_vault)
         );
 
-        // Deploy AaveV3Wrapper for depositing underlying tokens to intermediate vault
-        AaveV3Wrapper aaveV3Wrapper = new AaveV3Wrapper(evc, WETH);
-        vm.label(address(aaveV3Wrapper), "AaveV3Wrapper");
-        finalJson = vm.serializeAddress(
-            deploymentJson,
-            "aaveV3Wrapper",
-            address(aaveV3Wrapper)
-        );
-        log("AaveV3Wrapper", address(aaveV3Wrapper));
 
         // Deploy AaveV3 Operators
         AaveV3LeverageOperator aaveV3LeverageOperator = new AaveV3LeverageOperator(
@@ -271,7 +261,6 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         // transferOwnership to SAFE :check
         // deploy intermediate vault :check
         // set governor as vault manager :check
-        // deploy AaveV3Wrapper :check
         // deploy AaveV3 operators :check
         vm.stopBroadcast();
 
@@ -323,20 +312,20 @@ contract TwyneDeployAaveV3Integration is BatchScript {
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set oracle resolved true for new vault
-        vaultManagerCall = abi.encodeCall(vaultManager.setOracleResolvedVaultForOracleRouter, (address(aaveOracleRouter), address(eaWSTETH_intermediate_vault), true));
+        vaultManagerCall = abi.encodeCall(vaultManager.setOracleResolvedVault, (address(aaveOracleRouter), address(eaWSTETH_intermediate_vault), true));
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set external liq buffer
         vaultManagerCall = abi.encodeCall(
             vaultManager.setExternalLiqBuffer,
-            (address(eaWSTETH_intermediate_vault), 1e4, 0)
+            (address(eaWSTETH_intermediate_vault), eaWSTETH_intermediate_vault.asset(), 1e4, 0)
         );
         addToBatch(address(vaultManager), vaultManagerCall);
 
         // Set max liq ltv
         vaultManagerCall = abi.encodeCall(
             vaultManager.setMaxLiquidationLTV,
-            (address(eaWSTETH_intermediate_vault), 0.98e4, 0)
+            (address(eaWSTETH_intermediate_vault), eaWSTETH_intermediate_vault.asset(), 0.98e4, 0)
         );
         addToBatch(address(vaultManager), vaultManagerCall);
 

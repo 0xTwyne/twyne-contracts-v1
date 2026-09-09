@@ -23,6 +23,7 @@ interface IErrors {
     error RepayingMoreThanMax(); // 0x4fc5c4ba
     error SelfLiquidation(); // 0x44511af1
     error SnapshotNotTaken(); // 0xcb85efac
+    error UnitOfAccountMismatch(); // 0xe1f30ee9
     error T_CV_OperationDisabled(); // 0x335c5fec
     error T_OperationDisabled(); // 0x4f6309cb
     error ValueOutOfRange(); // 0x4eb4f9fb
@@ -34,6 +35,7 @@ interface IErrors {
     error CallerNotOwnerOrPauseGuardian(); // 0x384b6fd5
     error CallerNotAdmin();
     error ZeroAddress();
+    error SubAccountBlocked(); // 0x1dca713e
 
     // LeverageOperator errors
     error T_CallerNotBorrower(); // 0xf74e1da2
@@ -41,8 +43,21 @@ interface IErrors {
     error T_InvalidCollateralVault(); // 0x2f1d23b4
     error T_DebtMoreThanMax(); // 0xdce22b7d
     error T_CallerNotSelf(); // 0xd4567b27
+    error T_SlippageCheckFailed(); // 0xf6505d3c
+    error T_DeadlineExpired(); // 0xccff1bb3
 
     // AaveV3WrapperOracle errors
     error T_QuoteNotUSD(); // 0xefbdf8b4
     error T_FeedDecimalsNotCorrect(); // 0x0fd6d52c
+
+    // Morpho errors
+    error T_MorphoNotImplemented(); // 0x7ed18fcf
+
+    // Periphery (AssetZap / WstethHandler) errors
+    error T_MinAmountOut(); // 0xd35cee54
+    error T_InputIsUnderlying(); // 0xc3992486
+    error T_StakeFailed(); // 0x12bf9540
+    error T_InvalidWrapper(); // 0x69ab4ceb
+    error T_NotUnderlying(); // tokenIn is not the wrapper's underlying
+    error T_BorrowExceedsMaxLTV(); // 0xa365e6c3
 }

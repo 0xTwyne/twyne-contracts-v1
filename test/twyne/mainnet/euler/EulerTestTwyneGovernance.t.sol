@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.28;
 
-import {EulerTestBase, VaultType} from "./EulerTestBase.t.sol";
+import {EulerTestBase} from "./EulerTestBase.t.sol";
 import {Math} from "openzeppelin-contracts/utils/math/Math.sol";
 import {IEVault} from "euler-vault-kit/EVault/IEVault.sol";
 import {EulerRouter} from "euler-price-oracle/src/EulerRouter.sol";
@@ -48,15 +48,15 @@ contract EulerTestNormalActions is EulerTestBase {
         CrossAdapter crossAdapterOracle = new CrossAdapter(underlyingTarget, USD, underlyingCollateral, oracleBaseCross, oracleCrossQuote);
 
         // Finish configuration of the new vault with twyneVaultManager
-        twyneVaultManager.setOracleResolvedVault(address(new_intermediate_vault), true);
-        twyneVaultManager.setOracleResolvedVault(_collateralAsset, true); // need to set this for recursive resolveOracle() lookup
+        twyneVaultManager.setOracleResolvedVault(address(oracleRouter), address(new_intermediate_vault), true);
+        twyneVaultManager.setOracleResolvedVault(address(oracleRouter), _collateralAsset, true); // need to set this for recursive resolveOracle() lookup
         eulerExternalOracle = EulerRouter(EulerRouter(IEVault(_collateralAsset).oracle()).getConfiguredOracle(IEVault(_collateralAsset).asset(), USD));
-        twyneVaultManager.doCall(address(twyneVaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_collateralAsset).asset(), USD, address(eulerExternalOracle))));
+        twyneVaultManager.doCall(address(oracleRouter), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_collateralAsset).asset(), USD, address(eulerExternalOracle))));
         // twyneVaultManager.setIntermediateVault(IEVault(new_intermediate_vault)); // already done in newIntermediateVault()
 
-        // 2. Configure twyneVaultManager for the new pair (params keyed by intermediate vault)
-        twyneVaultManager.setMaxLiquidationLTV(address(new_intermediate_vault), 0.93e4, 0); // 93%
-        twyneVaultManager.setExternalLiqBuffer(address(new_intermediate_vault), 1e4, 0); // 1%
+        // 2. Configure twyneVaultManager for the new pair (params keyed by intermediate vault + target asset)
+        twyneVaultManager.setMaxLiquidationLTV(address(new_intermediate_vault), underlyingTarget, 0.93e4, 0); // 93%
+        twyneVaultManager.setExternalLiqBuffer(address(new_intermediate_vault), underlyingTarget, 1e4, 0); // 1%
         twyneVaultManager.setAllowedTargetVault(address(new_intermediate_vault), _targetAsset);
 
         // 3. Deploy a new EulerCollateralVault implementation for the target asset and set the beacon
@@ -73,13 +73,7 @@ contract EulerTestNormalActions is EulerTestBase {
 
         // 5. Optionally, deploy an example collateral vault
         EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault(
-                VaultType.EULER_V2,
-                address(new_intermediate_vault),
-                _targetAsset,
-                twyneLiqLTV,
-                address(0)
-            )
+            collateralVaultFactory.createEulerCollateralVault(address(new_intermediate_vault), _targetAsset, twyneLiqLTV)
         );
         vm.stopPrank();
     }
@@ -90,10 +84,10 @@ contract EulerTestNormalActions is EulerTestBase {
         e_addNewPair(collateralAsset, targetAsset);
 
         // Add assertions to verify the necessary oracle paths are properly setup
-        require(twyneVaultManager.oracleRouter().getQuote(1e16, collateralAsset, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
-        require(twyneVaultManager.oracleRouter().getQuote(1e16, IEVault(collateralAsset).asset(), IEVault(collateralAsset).unitOfAccount()) != 0, "bad setup for collateral asset underlying oracle"); // USDC -> WETH
-        require(twyneVaultManager.oracleRouter().getQuote(1e16, IEVault(targetAsset).asset(), USD) != 0, "bad setup for target asset accounting oracle"); // WETH -> USD
-        require(twyneVaultManager.oracleRouter().getQuote(1e16, IEVault(targetAsset).asset(), IEVault(collateralAsset).asset()) != 0, "bad setup for target asset oracle"); // WETH -> USDC
+        require(oracleRouter.getQuote(1e16, collateralAsset, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
+        require(oracleRouter.getQuote(1e16, IEVault(collateralAsset).asset(), IEVault(collateralAsset).unitOfAccount()) != 0, "bad setup for collateral asset underlying oracle"); // USDC -> WETH
+        require(oracleRouter.getQuote(1e16, IEVault(targetAsset).asset(), USD) != 0, "bad setup for target asset accounting oracle"); // WETH -> USD
+        require(oracleRouter.getQuote(1e16, IEVault(targetAsset).asset(), IEVault(collateralAsset).asset()) != 0, "bad setup for target asset oracle"); // WETH -> USDC
         require(intermediateVaultFor[collateralAsset] != address(0), "intermediate vault not properly created");
     }
 

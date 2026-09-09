@@ -1,9 +1,6 @@
 {
   "lib/aave-v3-origin": {
-    "tag": {
-      "name": "v3.5.0",
-      "rev": "6138e1fda45884b6547d094a1ddeef43dcab4977"
-    }
+    "rev": "cff15de6d1271b0c800fc001f4aea4c263e8a597"
   },
   "lib/euler-price-oracle": {
     "rev": "f52cb43b587c7fa90a7e722d52698003451feb62"
@@ -12,10 +9,13 @@
     "rev": "5b98b42048ba11ae82fb62dfec06d1010c8e41e6"
   },
   "lib/forge-safe": {
-    "rev": "2a9bca10d8a30c7740a5de5d2a8a4bc9b10ef76e"
+    "rev": "76344f152e800857e4222da0a0aa54e8756d36c4"
   },
   "lib/forge-std": {
     "rev": "3b20d60d14b343ee4f908cb8079495c07f5e8981"
+  },
+  "lib/morpho-blue": {
+    "rev": "55d2d99304fb3fb930c688462ae2ccabb1d533ad"
   },
   "lib/openzeppelin-contracts-upgradeable": {
     "rev": "3d5fa5c24c411112bab47bec25cfa9ad0af0e6e8"

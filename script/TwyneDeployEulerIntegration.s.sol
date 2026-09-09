@@ -9,7 +9,7 @@ import {IRMTwyneCurve} from "src/twyne/IRMTwyneCurve.sol";
 import {EVault} from "euler-vault-kit/EVault/EVault.sol";
 import {SequenceRegistry} from "euler-vault-kit/SequenceRegistry/SequenceRegistry.sol";
 import {GenericFactory} from "euler-vault-kit/GenericFactory/GenericFactory.sol";
-import {CollateralVaultFactory, VaultType} from "src/TwyneFactory/CollateralVaultFactory.sol";
+import {CollateralVaultFactory} from "src/TwyneFactory/CollateralVaultFactory.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {Initialize} from "euler-vault-kit/EVault/modules/Initialize.sol";
 import {Token} from "euler-vault-kit/EVault/modules/Token.sol";
@@ -33,7 +33,6 @@ import {VaultManager} from "src/twyne/VaultManager.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {Address} from "openzeppelin-contracts/utils/Address.sol";
 import {LeverageOperator} from "src/operators/LeverageOperator.sol";
-import {EulerWrapper} from "src/Periphery/EulerWrapper.sol";
 
 interface EulerRouterFactory {
     function deploy(address) external returns (address);
@@ -196,11 +195,11 @@ contract TwyneDeployEulerIntegration is Script {
         new_vault.setInterestFee(0); // set zero governance fee
         new_vault.setCaps(44818, 44818); // 7 WETH supply and borrow cap
 
-        vaultManager.setOracleResolvedVault(address(new_vault), true);
-        vaultManager.setOracleResolvedVault(_asset, true); // need to set this for recursive resolveOracle() lookup
+        vaultManager.setOracleResolvedVault(address(oracleRouter), address(new_vault), true);
+        vaultManager.setOracleResolvedVault(address(oracleRouter), _asset, true); // need to set this for recursive resolveOracle() lookup
         address eulerExternalOracle = EulerRouter(IEVault(_asset).oracle()).getConfiguredOracle(IEVault(_asset).asset(), USD);
         assert(keccak256(abi.encodePacked(EulerRouter(eulerExternalOracle).name())) == keccak256(abi.encodePacked("ChainlinkOracle")) || keccak256(abi.encodePacked(EulerRouter(eulerExternalOracle).name())) == keccak256(abi.encodePacked("CrossAdapter")));
-        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_asset).asset(), USD, eulerExternalOracle)));
+        vaultManager.doCall(address(oracleRouter), 0, abi.encodeCall(EulerRouter.govSetConfig, (IEVault(_asset).asset(), USD, eulerExternalOracle)));
         vaultManager.setIntermediateVault(new_vault, true);
         new_vault.setGovernorAdmin(address(vaultManager));
 
@@ -320,8 +319,6 @@ contract TwyneDeployEulerIntegration is Script {
         );
         vm.label(address(leverageOperator), "leverageOperator");
 
-        EulerWrapper eulerWrapper = new EulerWrapper(address(evc), WETH);
-        vm.label(address(eulerWrapper), "eulerWrapper");
 
         // Change ownership of EVK deploy contracts
         oracleRouter.transferGovernance(address(vaultManager));
@@ -330,13 +327,12 @@ contract TwyneDeployEulerIntegration is Script {
         collateralVaultFactory.setBeacon(eulerUSDC, address(upgradeableBeacon));
         collateralVaultFactory.setVaultManager(address(vaultManager));
 
-        vaultManager.setOracleRouter(address(oracleRouter));
 
         // First: deploy intermediate vault, then users can deploy corresponding collateral vaults
         eeWETH_intermediate_vault = newIntermediateVault(eulerWETH, address(oracleRouter), USD);
 
-        vaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), 0.94e4, 0);
-        vaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), 1e4, 0);
+        vaultManager.setMaxLiquidationLTV(address(eeWETH_intermediate_vault), eeWETH_intermediate_vault.asset(), 0.94e4, 0);
+        vaultManager.setExternalLiqBuffer(address(eeWETH_intermediate_vault), eeWETH_intermediate_vault.asset(), 1e4, 0);
         require(IEVault(eulerUSDC).LTVBorrow(eeWETH_intermediate_vault.asset()) != 0, InvalidCollateral());
         vaultManager.setAllowedTargetVault(address(eeWETH_intermediate_vault), eulerUSDC);
 
@@ -347,23 +343,21 @@ contract TwyneDeployEulerIntegration is Script {
         address oracleBaseCross = EulerRouter(IEVault(eulerUSDC).oracle()).getConfiguredOracle(baseAsset, crossAsset);
         address oracleCrossQuote = oracleRouter.getConfiguredOracle(quoteAsset, crossAsset);
         CrossAdapter crossAdapterOracle = new CrossAdapter(baseAsset, crossAsset, quoteAsset, address(oracleBaseCross), address(oracleCrossQuote));
-        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdapterOracle))));
-        vaultManager.doCall(address(vaultManager.oracleRouter()), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, USD, oracleBaseCross)));
+        vaultManager.doCall(address(oracleRouter), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, quoteAsset, address(crossAdapterOracle))));
+        vaultManager.doCall(address(oracleRouter), 0, abi.encodeCall(EulerRouter.govSetConfig, (baseAsset, USD, oracleBaseCross)));
 
         // Add assertions to verify the necessary oracle paths are properly setup
-        require(vaultManager.oracleRouter().getQuote(1e16, eulerWETH, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
-        require(vaultManager.oracleRouter().getQuote(1e16, eeWETH_intermediate_vault.asset(), IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount()) != 0, "bad setup for target asset oracle"); // eWETH -> USD
-        require(vaultManager.oracleRouter().getQuote(1e16, USDC, WETH) != 0, "bad setup for target asset oracle"); // USDC -> WETH
-        require(vaultManager.oracleRouter().getQuote(1e16, baseAsset, quoteAsset) != 0, "bad setup for target asset oracle"); // USDC -> WETH
+        require(oracleRouter.getQuote(1e16, eulerWETH, USD) != 0, "bad setup for collateral asset oracle"); // eWETH -> USD
+        require(oracleRouter.getQuote(1e16, eeWETH_intermediate_vault.asset(), IEVault(eeWETH_intermediate_vault.asset()).unitOfAccount()) != 0, "bad setup for target asset oracle"); // eWETH -> USD
+        require(oracleRouter.getQuote(1e16, USDC, WETH) != 0, "bad setup for target asset oracle"); // USDC -> WETH
+        require(oracleRouter.getQuote(1e16, baseAsset, quoteAsset) != 0, "bad setup for target asset oracle"); // USDC -> WETH
 
         // Next: Deploy collateral vault
         deployer_collateral_vault = EulerCollateralVault(
-            collateralVaultFactory.createCollateralVault({
-                _vaultType: VaultType.EULER_V2,
+            collateralVaultFactory.createEulerCollateralVault({
                 _intermediateVault: address(eeWETH_intermediate_vault),
                 _targetVault: eulerUSDC,
-                _liqLTV: twyneLiqLTV,
-                _targetAsset: address(0)
+                _liqLTV: twyneLiqLTV
             })
         );
         vm.stopBroadcast();
@@ -377,7 +371,6 @@ contract TwyneDeployEulerIntegration is Script {
         log("upgradeable beacon", address(upgradeableBeacon));
         log("deployer_collateral_vault", address(deployer_collateral_vault));
         log("leverageOperator", address(leverageOperator));
-        log("eulerWrapper", address(eulerWrapper));
 
         // Store the variables to be saved in TwyneAddresses output file
         TwyneAddresses memory twyneAddresses;
@@ -389,7 +382,6 @@ contract TwyneDeployEulerIntegration is Script {
         twyneAddresses.upgrBeacon = address(upgradeableBeacon);
         twyneAddresses.deployerExampleCollateralVault = address(deployer_collateral_vault);
         twyneAddresses.leverageOperator = address(leverageOperator);
-        twyneAddresses.eulerWrapper = address(eulerWrapper);
         string memory serializedTwyneAddresses = serializeTwyneAddresses(twyneAddresses);
 
         vm.writeJson(serializedTwyneAddresses, "./TwyneAddresses_output.json");
